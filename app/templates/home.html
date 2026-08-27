@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}New inspection · {{ app_name }}{% endblock %}
+{% block content %}
+<!-- Field Manual: evidence-first, rail-and-ledger layout, spruce/amber signals, Outfit + Work Sans. -->
+<header class="workspace-head">
+  <div>
+    <p class="eyebrow"><span class="crawl-trace" aria-hidden="true"></span> INSPECTION 01 / LOCAL-ONLY</p>
+    <h1>Inspect the site you are authorized to assess.</h1>
+    <p class="lede">Crawl a site you own or have explicit permission to test. Capture source HTML, a rendered page view, technical signals, and an evidence-backed audit—without sending your crawl data to a hosted platform.</p>
+  </div>
+  <div class="head-stamp"><span class="stamp">ROBOTS RESPECTED</span><span class="stamp">NO SITE CHANGES</span></div>
+</header>
+
+<section class="start-grid" aria-labelledby="crawl-form-title">
+  <div class="inspection-intro">
+    <div class="section-number">01</div>
+    <h2 id="crawl-form-title">Set the inspection boundary.</h2>
+    <p>Each run is held to one normalized host, a request delay, and an explicit URL cap. External links are recorded as evidence, not crawled.</p>
+    <img class="intro-art" src="/manus-storage/local-seo-spider-hero_2a233e94.jpg" alt="Abstract technical field notebook with crawl diagrams" />
+  </div>
+  <div id="crawl-form-panel" class="form-sheet">
+    {% include "partials/crawl_form.html" %}
+  </div>
+</section>
+
+<section id="recent-crawls" class="ledger-section" aria-labelledby="ledger-title">
+  <div class="section-heading"><div><span class="section-number">02</span><h2 id="ledger-title">Crawl ledger</h2></div><p>Every completed inspection is retained locally for comparison and export.</p></div>
+  {% if crawls %}
+  <div class="crawl-ledger" role="list">
+    {% for entry in crawls %}
+    <a class="crawl-row" role="listitem" href="/crawls/{{ entry.id }}">
+      <span class="status-dot {{ entry.status }}" aria-hidden="true"></span>
+      <span class="crawl-url"><strong>{{ entry.start_url|visible_url }}</strong><small>{{ entry.created_at }}</small></span>
+      <span class="crawl-setting">{{ entry.settings.mode }} mode<br /><small>{{ entry.settings.max_urls }} URL cap</small></span>
+      <span class="crawl-count"><strong>{{ entry.pages_crawled }}</strong><small>pages</small></span>
+      <span class="crawl-count"><strong>{{ entry.issues_found }}</strong><small>issues</small></span>
+      <span class="status-label {{ entry.status }}">{{ entry.status }}</span>
+      <span aria-hidden="true">→</span>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty-ledger">
+    <img src="/manus-storage/local-seo-spider-empty_cc49766e.jpg" alt="Abstract notebook and crawl path illustration" />
+    <div><span class="stamp">NO LOCAL RECORDS YET</span><h3>Your first inspection will appear here.</h3><p>Start with a small URL cap to check scope, crawl behavior, and the collected evidence before expanding a permitted audit.</p></div>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="A local, permission-gated technical SEO crawler with reproducible audit exports." />
+    <title>{% block title %}{{ app_name }}{% endblock %}</title>
+    <link rel="icon" type="image/png" href="/manus-storage/local-seo-spider-logo_4b5be979.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Work+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to the workspace</a>
+    <div class="shell">
+      <aside class="rail" aria-label="Application navigation">
+        <a class="brand" href="/" aria-label="Local SEO Spider home">
+          <img src="/manus-storage/local-seo-spider-logo_4b5be979.png" width="42" height="42" alt="" />
+          <span>Local SEO<br /><strong>Spider</strong></span>
+        </a>
+        <p class="rail-label">LOCAL INSTRUMENT</p>
+        <nav>
+          <a class="nav-link active" href="/"><span class="nav-index">01</span> New inspection</a>
+          <a class="nav-link" href="#recent-crawls"><span class="nav-index">02</span> Crawl ledger</a>
+          {% if crawl %}<a class="nav-link" href="/crawls/{{ crawl.id }}/content"><span class="nav-index">03</span> Content inventory</a>{% endif %}
+        </nav>
+        <div class="rail-note">
+          <span class="stamp">LOCAL DATA</span>
+          <p>Results remain in <code>data/</code> on this machine until you export or remove them.</p>
+        </div>
+      </aside>
+      <main id="main-content" class="workspace">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </body>
+</html>

@@ -111,3 +111,13 @@ temp/
 # Manus version file (auto-generated, not part of source)
 client/public/__manus__/version.json
 .project-config.json
+
+# Local Python environments, crawl data, and generated audits
+.venv/
+*.egg-info/
+.vite/
+data/
+exports/
+.pytest_cache/
+__pycache__/
+*.py[cod]

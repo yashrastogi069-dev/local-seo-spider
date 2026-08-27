@@ -1,0 +1,52 @@
+"""Local configuration; values are read from .env and never uploaded."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+def _as_bool(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+@dataclass(frozen=True)
+class Settings:
+    data_dir: Path
+    user_agent: str
+    default_url_cap: int
+    max_url_cap: int
+    default_delay_seconds: float
+    request_timeout_seconds: float
+    render_timeout_ms: int
+    max_redirects: int
+    max_document_bytes: int
+    max_concurrent_crawls: int
+    render_enabled: bool
+
+    @property
+    def database_path(self) -> Path:
+        return self.data_dir / "local_seo_spider.sqlite3"
+
+    @classmethod
+    def from_environment(cls, base_dir: Path | None = None) -> "Settings":
+        root = base_dir or Path.cwd()
+        load_dotenv(root / ".env")
+        configured_data_dir = Path(os.getenv("SPIDER_DATA_DIR", "./data"))
+        data_dir = configured_data_dir if configured_data_dir.is_absolute() else root / configured_data_dir
+        return cls(
+            data_dir=data_dir.resolve(),
+            user_agent=os.getenv("SPIDER_USER_AGENT", "LocalSEOSpider/0.1 (+local-authorized-audit)"),
+            default_url_cap=int(os.getenv("SPIDER_DEFAULT_URL_CAP", "500")),
+            max_url_cap=int(os.getenv("SPIDER_MAX_URL_CAP", "10000")),
+            default_delay_seconds=float(os.getenv("SPIDER_DEFAULT_DELAY_SECONDS", "0.35")),
+            request_timeout_seconds=float(os.getenv("SPIDER_REQUEST_TIMEOUT_SECONDS", "20")),
+            render_timeout_ms=int(os.getenv("SPIDER_RENDER_TIMEOUT_SECONDS", "25000")),
+            max_redirects=int(os.getenv("SPIDER_MAX_REDIRECTS", "8")),
+            max_document_bytes=int(os.getenv("SPIDER_MAX_DOCUMENT_BYTES", "2097152")),
+            max_concurrent_crawls=max(1, int(os.getenv("SPIDER_MAX_CONCURRENT_CRAWLS", "1"))),
+            render_enabled=_as_bool(os.getenv("SPIDER_RENDER_ENABLED", "true")),
+        )

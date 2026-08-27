@@ -1,0 +1,13 @@
+# Local Verification Notes
+
+The FastAPI home route and the `/static/style.css` endpoint both responded successfully during the local browser check. The first rendered home view appeared unstyled because the stylesheet URL was emitted as the `127.0.0.1` absolute URL rather than the browser proxy’s same-origin URL. The stylesheet was changed to `/static/style.css` and the rendered home view then showed the intended Field Manual layout, permission acknowledgement, form controls, artwork, and empty crawl-ledger state.
+
+The next manual verification step uses `http://127.0.0.1:8000/` as a local fixture target. This target is hosted by the running local application and is therefore controlled within this verification environment.
+
+The authorization checkbox was selected in the browser, but submitting the form fell back to a regular GET request and omitted the checkbox value. This indicated the external HTMX script did not load; the unverifiable script-integrity value was removed and the pinned HTMX URL now loads. The browser recognizes the crawl request as an enhanced form, and the controlled local fixture URL is retained in the URL field before submission.
+
+The automated checkbox click did not toggle the visually required acknowledgement control, so native browser validation correctly prevented submission. This confirmed the permission acknowledgement is a blocking requirement. Clicking the visible label selected the control. Submitting then replaced only the form panel with the HTMX active-crawl state: `INSPECTION ACTIVE`, a pending status, pages inspected count, URL cap, delay, and an instruction not to close the page. This validates the loading state and authorization gate in the live browser flow against the controlled fixture.
+
+The controlled fixture crawl reached the completed state and its audit ledger rendered with page and issue totals, severity-ordered evidence, remediation notes, a detailed page inventory, and local CSV and self-contained HTML export links. The temporary fixture application generated a dynamic content-inventory link before its crawl record was complete, which resulted in one expected 404 in the fixture audit; this is a property of crawling the crawler’s own in-progress internal route, not a behavior required for a normal authorized target website.
+
+The completed content-inventory route rendered successfully. It shows deliberately bounded marketing-oriented local evidence: title and description coverage, JSON-LD coverage, internal-inlink count, and a page-level table of title, description, H1, rendered word count, image alternate-text coverage, and schema inventory. It explicitly avoids rank, traffic, rich-result, and click-through claims.
