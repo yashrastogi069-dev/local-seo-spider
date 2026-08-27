@@ -12,4 +12,5 @@
 - [x] Add validation, safe filenames, loading/empty/success/recoverable-error states, and graceful fallback behavior.
 - [x] Write focused unit and end-to-end tests, run them, and document the exact local setup and backup workflow.
 - [x] Create a private GitHub repository and push only validated source and documentation; keep .env, local crawl data, exports, and environments excluded.
-- [ ] Exclude unpermissioned crawling, web-scale data harvesting, credential capture, and automated production-site changes.
+- [x] Exclude unpermissioned crawling, web-scale data harvesting, credential capture, and automated production-site changes.
+- [x] Restart the development service and verify the local preview is reachable.

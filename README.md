@@ -12,7 +12,7 @@ From the repository root, run exactly one command:
 ./run-local.sh
 ```
 
-The command requires Python **3.12**, creates `.venv`, copies the safe checked-in configuration template to local `.env` when needed, installs the project and its test dependencies, installs Playwright Chromium, and starts the application at [http://127.0.0.1:8000](http://127.0.0.1:8000). Review the `.env` values before the first crawl if you need a lower cap, a slower delay, or rendering disabled.
+The command requires Python **3.12**, creates `.venv`, copies the safe checked-in configuration template to local `.env` when needed, installs the project and its test dependencies, installs Playwright Chromium, and starts the application at [http://127.0.0.1:3000](http://127.0.0.1:3000). Review the `.env` values before the first crawl if you need a lower cap, a slower delay, or rendering disabled.
 
 The repository includes `local-seo-spider.env.example` as the safe default configuration template; the first run copies it to local `.env`. `.env` is ignored by Git. No API secrets are required for this local application. The managed workspace prevents a literal `.env.example` file from being generated programmatically; the supplied template is functionally equivalent and intentionally contains no credentials.
 

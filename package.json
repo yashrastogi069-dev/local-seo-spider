@@ -1,0 +1,7 @@
+{
+  "name": "local-seo-spider-runner",
+  "private": true,
+  "scripts": {
+    "dev": "./run-local.sh"
+  }
+}
