@@ -1,26 +1,30 @@
 <!-- Field Manual: explicit authority and scope are first-class interaction states. -->
-<form hx-post="/crawls" hx-target="#crawl-form-panel" hx-swap="innerHTML" hx-indicator="#form-loading" novalidate>
+<form method="post" action="/crawls" hx-post="/crawls" hx-target="#crawl-form-panel" hx-swap="innerHTML" hx-indicator="#form-loading" novalidate>
   <div class="form-head"><p class="eyebrow">CRAWL REQUEST</p><span class="stamp">REQUIRED FIELDS</span></div>
+  <ol class="inspection-stages" aria-label="Inspection stages"><li class="active"><span>01</span> Target</li><li><span>02</span> Boundary</li><li><span>03</span> Permission</li></ol>
   {% if error %}<div class="form-error" role="alert"><strong>Review the request.</strong><span>{{ error }}</span></div>{% endif %}
-  <div class="field wide">
-    <label for="start_url">Starting URL</label>
-    <input id="start_url" name="start_url" type="url" inputmode="url" placeholder="https://www.example.com/" required autocomplete="url" />
-    <p class="field-hint">Use a full http or https URL. URLs with embedded credentials are rejected.</p>
-  </div>
-  <fieldset class="mode-fieldset">
-    <legend>Crawl mode</legend>
-    <label class="choice-card"><input type="radio" name="mode" value="site" checked /><span><strong>Site crawl</strong><small>Discover followable same-host links.</small></span></label>
-    <label class="choice-card"><input type="radio" name="mode" value="list" /><span><strong>Exact URL list</strong><small>Inspect only the URLs you provide.</small></span></label>
-  </fieldset>
-  <div class="field wide">
-    <label for="url_list">Exact URL list <span class="optional">(only for exact-list mode)</span></label>
-    <textarea id="url_list" name="url_list" rows="4" placeholder="https://www.example.com/page-a&#10;https://www.example.com/page-b"></textarea>
-  </div>
+  <section class="field-group" aria-labelledby="target-group-title"><div class="group-label"><span>01</span><strong id="target-group-title">Target record</strong><small>What will be inspected</small></div><div class="field wide">
+      <label for="start_url">Starting URL</label>
+      <input id="start_url" name="start_url" type="url" inputmode="url" placeholder="https://www.example.com/" required autocomplete="url" />
+      <p class="field-hint">Use a full http or https URL. URLs with embedded credentials are rejected.</p>
+    </div>
+    <fieldset class="mode-fieldset">
+      <legend>Crawl mode</legend>
+      <label class="choice-card"><input type="radio" name="mode" value="site" checked /><span><strong>Site crawl</strong><small>Discover followable same-host links.</small></span></label>
+      <label class="choice-card"><input type="radio" name="mode" value="list" /><span><strong>Exact URL list</strong><small>Inspect only the URLs you provide.</small></span></label>
+    </fieldset>
+    <div class="field wide">
+      <label for="url_list">Exact URL list <span class="optional">(only for exact-list mode)</span></label>
+      <textarea id="url_list" name="url_list" rows="4" placeholder="https://www.example.com/page-a&#10;https://www.example.com/page-b"></textarea>
+    </div>
+  </section>
+  <section class="field-group boundary-group" aria-labelledby="boundary-group-title"><div class="group-label"><span>02</span><strong id="boundary-group-title">Boundary record</strong><small>How the crawl is contained</small></div>
   <div class="form-columns">
     <div class="field"><label for="max_urls">URL cap</label><input id="max_urls" name="max_urls" type="number" min="1" max="{{ defaults.max_url_cap }}" value="{{ defaults.url_cap }}" required /><p class="field-hint">Maximum {{ defaults.max_url_cap }} URLs.</p></div>
     <div class="field"><label for="delay_seconds">Delay per request</label><input id="delay_seconds" name="delay_seconds" type="number" min="0.1" max="60" step="0.1" value="{{ defaults.delay }}" required /><p class="field-hint">Seconds; minimum 0.1.</p></div>
   </div>
-  <label class="checkline"><input type="checkbox" name="respect_nofollow" value="yes" checked /><span><strong>Respect <code>rel="nofollow"</code> for discovery.</strong><small>Nofollow links are still retained as evidence but are not queued.</small></span></label>
+    <label class="checkline"><input type="checkbox" name="respect_nofollow" value="yes" checked /><span><strong>Respect <code>rel="nofollow"</code> for discovery.</strong><small>Nofollow links are still retained as evidence but are not queued.</small></span></label>
+  </section>
   <div class="permission-box">
     <span class="permission-index" aria-hidden="true">!</span>
     <div><strong>Permission acknowledgement</strong><p>This crawler sends requests to the specified host. Confirm that you own this site or have explicit authorization to assess it.</p><label class="checkline permission-check"><input type="checkbox" name="authorization_acknowledgment" value="yes" required /><span>I confirm I am authorized to crawl this exact host.</span></label></div>

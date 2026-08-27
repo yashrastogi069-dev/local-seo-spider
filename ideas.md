@@ -67,3 +67,9 @@ The mark is a compact **segmented crawl loop**: three broken concentric path seg
 
 ### Signature Brand Color
 **Ledger Spruce — `#173D3A`**.
+
+## Style Decisions
+
+- The dotted crawl trace is a visible recurring navigation and evidence motif: it connects the hero, inspection stages, scope groups, and the crawl ledger.
+- The logo remains the segmented crawl-loop magnifying aperture and is served as a first-class brand asset rather than substituted with a generic mark.
+- Form panels use named target and boundary record groups with rule-led divisions so they read as inspection ledgers rather than generic SaaS cards.

@@ -26,9 +26,23 @@ def test_authorized_crawl_renders_audit_and_exports(tmp_path, monkeypatch) -> No
 
     monkeypatch.setattr(main.CrawlEngine, "run", fake_run)
     with TestClient(main.app) as client:
+        health = client.get("/health")
+        assert health.status_code == 200
+        assert health.json()["status"] == "ok"
+
+        home = client.get("/")
+        assert home.status_code == 200
+        assert home.headers["x-content-type-options"] == "nosniff"
+        assert home.headers["x-frame-options"] == "DENY"
+        assert "form-action 'self'" in home.headers["content-security-policy"]
+
         rejected = client.post("/crawls", data={"start_url": "https://owned.example/", "max_urls": "5", "delay_seconds": "0.1"})
         assert rejected.status_code == 422
         assert "Confirm that you own this site" in rejected.text
+
+        plain_rejected = client.post("/crawls", data={"start_url": "https://owned.example/", "max_urls": "5", "delay_seconds": "0.1"}, headers={"HX-Request": "false"})
+        assert plain_rejected.status_code == 422
+        assert "Local SEO Spider" in plain_rejected.text
 
         created = client.post("/crawls", data={
             "start_url": "https://owned.example/", "mode": "site", "url_list": "", "max_urls": "5", "delay_seconds": "0.1",
@@ -53,3 +67,10 @@ def test_authorized_crawl_renders_audit_and_exports(tmp_path, monkeypatch) -> No
         report_export = client.get(f"/crawls/{crawl_id}/export/report-html")
         assert csv_export.status_code == 200 and "Missing page title" in csv_export.text
         assert report_export.status_code == 200 and "SEO inspection ledger" in report_export.text
+
+        fallback = client.post("/crawls", data={
+            "start_url": "https://owned.example/", "mode": "site", "url_list": "", "max_urls": "5", "delay_seconds": "0.1",
+            "respect_nofollow": "yes", "authorization_acknowledgment": "yes",
+        }, headers={"HX-Request": "false"}, follow_redirects=False)
+        assert fallback.status_code == 303
+        assert fallback.headers["location"].startswith("/crawls/")

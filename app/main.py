@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import uvicorn
@@ -23,6 +23,7 @@ from app.types import CrawlRequest
 from app.urltools import UrlValidationError, is_same_host, normalize_url, visible_url
 
 ROOT = Path(__file__).resolve().parent.parent
+ASSET_DIR = Path("/home/ubuntu/webdev-static-assets")
 settings = Settings.from_environment(ROOT)
 database = Database(settings.database_path)
 templates = Jinja2Templates(directory=str(ROOT / "app" / "templates"))
@@ -38,10 +39,36 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Local SEO Spider", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(ROOT / "app" / "static")), name="static")
+app.mount("/manus-storage", StaticFiles(directory=str(ASSET_DIR)), name="generated_assets")
+
+
+@app.middleware("http")
+async def local_security_headers(request: Request, call_next: object) -> Response:
+    response = await call_next(request)  # type: ignore[misc]
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'self' 'unsafe-inline' https://unpkg.com; connect-src 'self'; form-action 'self'; base-uri 'self'; frame-ancestors 'none'")
+    return response
 
 
 def _context(request: Request, **kwargs: object) -> dict[str, object]:
     return {"request": request, "app_name": "Local SEO Spider", **kwargs}
+
+
+def _home_response(request: Request, error: str | None = None, status_code: int = 200) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "home.html",
+        _context(
+            request,
+            crawls=database.list_crawls(),
+            error=error,
+            defaults={"url_cap": settings.default_url_cap, "delay": settings.default_delay_seconds, "max_url_cap": settings.max_url_cap},
+        ),
+        status_code=status_code,
+    )
 
 
 def _parse_request(start_url: str, mode: str, url_list: str, max_urls: str, delay_seconds: str, respect_nofollow: str | None, authorization_acknowledgment: str | None) -> CrawlRequest:
@@ -95,7 +122,7 @@ def _run_crawl(crawl_id: str, crawl_request: CrawlRequest) -> None:
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(request, "home.html", _context(request, crawls=database.list_crawls(), defaults={"url_cap": settings.default_url_cap, "delay": settings.default_delay_seconds, "max_url_cap": settings.max_url_cap}))
+    return _home_response(request)
 
 
 @app.post("/crawls", response_class=HTMLResponse)
@@ -109,13 +136,17 @@ def create_crawl(
     delay_seconds: Annotated[str, Form()] = str(settings.default_delay_seconds),
     respect_nofollow: Annotated[str | None, Form()] = None,
     authorization_acknowledgment: Annotated[str | None, Form()] = None,
-) -> HTMLResponse:
+) -> Response:
     try:
         crawl_request = _parse_request(start_url, mode, url_list, max_urls, delay_seconds, respect_nofollow, authorization_acknowledgment)
     except (ValueError, UrlValidationError) as exc:
+        if request.headers.get("HX-Request") != "true":
+            return _home_response(request, error=str(exc), status_code=422)
         return templates.TemplateResponse(request, "partials/crawl_form.html", _context(request, error=str(exc), defaults={"url_cap": settings.default_url_cap, "delay": settings.default_delay_seconds, "max_url_cap": settings.max_url_cap}), status_code=422)
     crawl_id = database.create_crawl(crawl_request)
     background_tasks.add_task(_run_crawl, crawl_id, crawl_request)
+    if request.headers.get("HX-Request") != "true":
+        return RedirectResponse(url=f"/crawls/{crawl_id}", status_code=303)
     return templates.TemplateResponse(request, "partials/crawl_status.html", _context(request, crawl=database.get_crawl(crawl_id)))
 
 
