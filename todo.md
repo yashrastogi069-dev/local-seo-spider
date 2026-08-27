@@ -11,5 +11,5 @@
 - [x] Export pages and issues to CSV plus a self-contained HTML audit report.
 - [x] Add validation, safe filenames, loading/empty/success/recoverable-error states, and graceful fallback behavior.
 - [x] Write focused unit and end-to-end tests, run them, and document the exact local setup and backup workflow.
-- [ ] Create a private GitHub repository and push only validated source and documentation; keep .env, local crawl data, exports, and environments excluded.
+- [x] Create a private GitHub repository and push only validated source and documentation; keep .env, local crawl data, exports, and environments excluded.
 - [ ] Exclude unpermissioned crawling, web-scale data harvesting, credential capture, and automated production-site changes.
