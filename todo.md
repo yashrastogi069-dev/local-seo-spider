@@ -16,7 +16,7 @@
 - [x] Restart the development service and verify the local preview is reachable.
 - [x] Review and improve the Field Manual interface with design and accessibility guidance.
 - [x] Run comprehensive functional, export, security-boundary, and responsive interface verification.
-- [ ] Confirm the private GitHub repository is current after the validation update.
+- [x] Confirm the private GitHub repository is current after the validation update.
 - [ ] Provide a step-by-step explanation of the completed crawler and validation results.
 - [x] Measure rendered text and status-color contrast against their actual surfaces and correct any verified failures.
-- [ ] Complete the standards-focused refinement and verification pass, then synchronize the final state to the private GitHub repository.
+- [x] Complete the standards-focused refinement and verification pass, then synchronize the final state to the private GitHub repository.
