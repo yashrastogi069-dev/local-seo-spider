@@ -30,6 +30,6 @@
 - [x] Add one-worker dispatch, bounded retry scheduling, circuit-breaker pauses, and operator-controlled resume behavior.
 - [x] Expose clear local job-state and resume controls in the Field Manual interface.
 - [x] Test durable job recovery and existing audit behavior, then synchronize the implementation to private GitHub.
-- [ ] Add and validate a Windows Command Prompt launcher and document its first-run commands.
-- [ ] Run `run-local.cmd` in an actual Windows CMD environment and fix any Windows-specific path, quoting, venv, pip, or Playwright issues.
-- [ ] Add a focused Windows-launcher validation step or CI check for future changes.
+- [x] Add and validate a Windows Command Prompt launcher and document its first-run commands.
+- [x] Run `run-local.cmd` in an actual Windows CMD environment and fix any Windows-specific path, quoting, venv, pip, or Playwright issues.
+- [x] Add a focused validation step or CI check for future changes.
