@@ -90,6 +90,13 @@ def test_fetch_retries_transient_http_errors_with_a_bounded_attempt_count() -> N
     assert error == ""
 
 
+def test_windows_launcher_uses_browser_safe_loopback_address() -> None:
+    launcher = Path(__file__).parents[1] / "run-local.cmd"
+    content = launcher.read_text(encoding="utf-8")
+    assert "--host 127.0.0.1" in content
+    assert "--host 0.0.0.0" not in content
+
+
 def test_fetch_retries_transport_timeout_then_continues_with_bounded_error() -> None:
     settings = Settings(
         data_dir=Path("data"), user_agent="LocalSEOSpider/Test", default_url_cap=5, max_url_cap=10,

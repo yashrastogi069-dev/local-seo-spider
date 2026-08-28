@@ -34,3 +34,4 @@
 - [x] Run `run-local.cmd` in an actual Windows CMD environment and fix any Windows-specific path, quoting, venv, pip, or Playwright issues.
 - [x] Add a focused validation step or CI check for future changes.
 - [x] Decide whether a `.bat` alias adds value beyond the validated `run-local.cmd`, and document the simplest Windows launch path.
+- [x] Fix Windows launcher output to show `http://127.0.0.1:<port>/` instead of the bind address `http://0.0.0.0:<port>/`, and add regression coverage.
