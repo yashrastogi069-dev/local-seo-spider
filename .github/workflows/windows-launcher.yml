@@ -1,6 +1,7 @@
 name: Windows launcher
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - "run-local.cmd"
