@@ -1,0 +1,52 @@
+name: Windows launcher
+
+on:
+  push:
+    paths:
+      - "run-local.cmd"
+      - "pyproject.toml"
+      - "local-seo-spider.env.example"
+      - ".github/workflows/windows-launcher.yml"
+  pull_request:
+    paths:
+      - "run-local.cmd"
+      - "pyproject.toml"
+      - "local-seo-spider.env.example"
+      - ".github/workflows/windows-launcher.yml"
+
+jobs:
+  smoke-test:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run CMD launcher and check health
+        shell: pwsh
+        run: |
+          $server = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "run-local.cmd" -WorkingDirectory "$pwd" -PassThru
+          try {
+            $healthy = $false
+            for ($attempt = 0; $attempt -lt 90; $attempt++) {
+              Start-Sleep -Seconds 2
+              try {
+                $response = Invoke-WebRequest -Uri "http://127.0.0.1:3000/health" -UseBasicParsing -TimeoutSec 5
+                if ($response.StatusCode -eq 200) {
+                  $healthy = $true
+                  break
+                }
+              } catch { }
+              if ($server.HasExited) {
+                throw "run-local.cmd exited before the health endpoint became available."
+              }
+            }
+            if (-not $healthy) {
+              throw "The Windows CMD launcher did not expose a healthy FastAPI service within 180 seconds."
+            }
+          } finally {
+            if (-not $server.HasExited) {
+              taskkill /PID $server.Id /T /F
+            }
+          }

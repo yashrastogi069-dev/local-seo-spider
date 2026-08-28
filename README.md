@@ -16,6 +16,15 @@ The command requires Python **3.12**, creates `.venv`, copies the safe checked-i
 
 The repository includes `local-seo-spider.env.example` as the safe default configuration template; the first run copies it to local `.env`. `.env` is ignored by Git. No API secrets are required for this local application. The managed workspace prevents a literal `.env.example` file from being generated programmatically; the supplied template is functionally equivalent and intentionally contains no credentials.
 
+On **Windows Command Prompt**, use the native launcher instead of `chmod` or Bash:
+
+```bat
+cd path\\to\\local-seo-spider
+run-local.cmd
+```
+
+This checks that `python` is Python 3.12, creates `.venv`, copies the local configuration template, installs the project, installs Chromium, and starts the app. Git Bash or WSL users can continue using `./run-local.sh`. The repository also includes a Windows CI smoke test that runs this CMD launcher on `windows-latest` and checks `/health`; the sandbox itself cannot execute Windows CMD directly.
+
 ## What a crawl collects
 
 Each crawl stores raw HTTP and rendered-browser evidence separately where applicable. For eligible HTML responses, the crawler captures the following fields locally.
