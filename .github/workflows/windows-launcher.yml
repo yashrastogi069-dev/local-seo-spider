@@ -26,7 +26,7 @@ jobs:
       - name: Run CMD launcher and check health
         shell: pwsh
         run: |
-          $server = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "run-local.cmd" -WorkingDirectory "$pwd" -PassThru
+          $server = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "run-local.cmd" -WorkingDirectory "$pwd" -RedirectStandardOutput "$pwd\\launcher.stdout.log" -RedirectStandardError "$pwd\\launcher.stderr.log" -PassThru
           try {
             $healthy = $false
             for ($attempt = 0; $attempt -lt 90; $attempt++) {
@@ -39,7 +39,9 @@ jobs:
                 }
               } catch { }
               if ($server.HasExited) {
-                throw "run-local.cmd exited before the health endpoint became available."
+                $stdout = if (Test-Path "$pwd\\launcher.stdout.log") { Get-Content "$pwd\\launcher.stdout.log" -Raw } else { "(no stdout)" }
+                $stderr = if (Test-Path "$pwd\\launcher.stderr.log") { Get-Content "$pwd\\launcher.stderr.log" -Raw } else { "(no stderr)" }
+                throw "run-local.cmd exited before the health endpoint became available (exit code $($server.ExitCode)).`nSTDOUT:`n$stdout`nSTDERR:`n$stderr"
               }
             }
             if (-not $healthy) {
