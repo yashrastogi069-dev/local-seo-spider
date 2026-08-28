@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,7 +24,8 @@ from app.types import CrawlRequest
 from app.urltools import UrlValidationError, is_same_host, normalize_url, visible_url
 
 ROOT = Path(__file__).resolve().parent.parent
-ASSET_DIR = Path("/home/ubuntu/webdev-static-assets")
+ASSET_DIR = Path(os.environ.get("SPIDER_ASSET_DIR", str(ROOT / "assets")))
+ASSET_DIR.mkdir(parents=True, exist_ok=True)
 settings = Settings.from_environment(ROOT)
 database = Database(settings.database_path)
 templates = Jinja2Templates(directory=str(ROOT / "app" / "templates"))
