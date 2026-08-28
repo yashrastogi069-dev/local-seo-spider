@@ -23,6 +23,8 @@ cd path\\to\\local-seo-spider
 run-local.cmd
 ```
 
+You can also run `run-local.bat` from CMD or by double-clicking it; it delegates to the same launcher.
+
 This checks that `python` is Python 3.12, creates `.venv`, copies the local configuration template, installs the project, installs Chromium, and starts the app. Git Bash or WSL users can continue using `./run-local.sh`. The repository also includes a Windows CI smoke test that runs this CMD launcher on `windows-latest` and checks `/health`; the sandbox itself cannot execute Windows CMD directly. When the generated visual assets are not present, the app creates an empty local `assets/` directory and remains functional; set `SPIDER_ASSET_DIR` if you want to point the app at a local asset folder.
 
 ## What a crawl collects

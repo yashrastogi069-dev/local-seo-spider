@@ -33,3 +33,4 @@
 - [x] Add and validate a Windows Command Prompt launcher and document its first-run commands.
 - [x] Run `run-local.cmd` in an actual Windows CMD environment and fix any Windows-specific path, quoting, venv, pip, or Playwright issues.
 - [x] Add a focused validation step or CI check for future changes.
+- [ ] Decide whether a `.bat` alias adds value beyond the validated `run-local.cmd`, and document the simplest Windows launch path.
