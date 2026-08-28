@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
@@ -36,7 +36,10 @@ class Database:
                   status TEXT NOT NULL, start_url TEXT NOT NULL, settings_json TEXT NOT NULL,
                   ownership_ack INTEGER NOT NULL, error_message TEXT NOT NULL DEFAULT '',
                   robots_status TEXT NOT NULL DEFAULT 'pending', pages_crawled INTEGER NOT NULL DEFAULT 0,
-                  issues_found INTEGER NOT NULL DEFAULT 0
+                  issues_found INTEGER NOT NULL DEFAULT 0,
+                  request_json TEXT NOT NULL DEFAULT '{}', attempts INTEGER NOT NULL DEFAULT 0,
+                  max_attempts INTEGER NOT NULL DEFAULT 3, next_run_at TEXT, last_attempt_at TEXT,
+                  pause_reason TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS pages (
                   id INTEGER PRIMARY KEY AUTOINCREMENT, crawl_id TEXT NOT NULL REFERENCES crawls(id) ON DELETE CASCADE,
@@ -64,15 +67,112 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_issues_crawl_severity ON issues(crawl_id, severity);
                 """
             )
+            self._ensure_crawl_columns(conn)
+
+    @staticmethod
+    def _ensure_crawl_columns(conn: sqlite3.Connection) -> None:
+        """Upgrade earlier local databases without requiring destructive migrations."""
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(crawls)")}
+        required = {
+            "request_json": "TEXT NOT NULL DEFAULT '{}'",
+            "attempts": "INTEGER NOT NULL DEFAULT 0",
+            "max_attempts": "INTEGER NOT NULL DEFAULT 3",
+            "next_run_at": "TEXT",
+            "last_attempt_at": "TEXT",
+            "pause_reason": "TEXT NOT NULL DEFAULT ''",
+        }
+        for name, definition in required.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE crawls ADD COLUMN {name} {definition}")
 
     def create_crawl(self, request: CrawlRequest) -> str:
         crawl_id = str(uuid4())
         with self.connect() as conn:
             conn.execute(
-                "INSERT INTO crawls (id, created_at, status, start_url, settings_json, ownership_ack) VALUES (?, ?, 'queued', ?, ?, ?)",
-                (crawl_id, now(), request.start_url, json.dumps(request.public_settings()), int(request.acknowledgment)),
+                """INSERT INTO crawls (id, created_at, status, start_url, settings_json, request_json, ownership_ack, next_run_at)
+                   VALUES (?, ?, 'queued', ?, ?, ?, ?, ?)""",
+                (crawl_id, now(), request.start_url, json.dumps(request.public_settings()), json.dumps(request.storage_payload()), int(request.acknowledgment), now()),
             )
         return crawl_id
+
+    def get_crawl_request(self, crawl_id: str) -> CrawlRequest | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT request_json FROM crawls WHERE id = ?", (crawl_id,)).fetchone()
+        if not row or not row["request_json"] or row["request_json"] == "{}":
+            return None
+        return CrawlRequest.from_storage_payload(json.loads(row["request_json"]))
+
+    def recover_interrupted_jobs(self) -> int:
+        """Return interrupted work to a deliberate retryable state when the local app starts."""
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """UPDATE crawls SET status = 'retryable', next_run_at = ?, error_message = ?, pause_reason = ''
+                   WHERE status = 'running'""",
+                (now(), "Local worker stopped before this authorized crawl completed. It is ready for a bounded retry."),
+            )
+        return cursor.rowcount
+
+    def claim_next_job(self) -> dict[str, Any] | None:
+        """Atomically claim one eligible job for the sole local worker."""
+        claim_time = now()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT * FROM crawls
+                   WHERE status IN ('queued', 'retryable')
+                   AND (next_run_at IS NULL OR next_run_at <= ?)
+                   ORDER BY created_at, id LIMIT 1""",
+                (claim_time,),
+            ).fetchone()
+            if not row:
+                return None
+            conn.execute(
+                """UPDATE crawls SET status = 'running', started_at = COALESCE(started_at, ?), last_attempt_at = ?,
+                   attempts = attempts + 1, error_message = '', pause_reason = '', next_run_at = NULL WHERE id = ?""",
+                (claim_time, claim_time, row["id"]),
+            )
+            claimed = conn.execute("SELECT * FROM crawls WHERE id = ?", (row["id"],)).fetchone()
+        return self._crawl_row(claimed) if claimed else None
+
+    def defer_or_pause_job(self, crawl_id: str, error_message: str) -> dict[str, Any] | None:
+        """Apply bounded backoff, then open a local circuit breaker after repeated worker failures."""
+        with self.connect() as conn:
+            row = conn.execute("SELECT attempts, max_attempts FROM crawls WHERE id = ?", (crawl_id,)).fetchone()
+            if not row:
+                return None
+            attempts, maximum = int(row["attempts"]), int(row["max_attempts"])
+            if attempts >= maximum:
+                conn.execute(
+                    """UPDATE crawls SET status = 'paused', completed_at = ?, error_message = ?, pause_reason = ?, next_run_at = NULL
+                       WHERE id = ?""",
+                    (now(), error_message, f"Circuit breaker opened after {attempts} worker attempts. Review the error and resume explicitly.", crawl_id),
+                )
+            else:
+                delay_seconds = min(300, 15 * (2 ** max(0, attempts - 1)))
+                retry_at = (datetime.now(UTC) + timedelta(seconds=delay_seconds)).replace(microsecond=0).isoformat()
+                conn.execute(
+                    """UPDATE crawls SET status = 'retryable', error_message = ?, pause_reason = ?, next_run_at = ? WHERE id = ?""",
+                    (error_message, f"Retry scheduled after {delay_seconds} seconds (attempt {attempts + 1} of {maximum}).", retry_at, crawl_id),
+                )
+        return self.get_crawl(crawl_id)
+
+    def pause_job(self, crawl_id: str, reason: str = "Paused by the local operator.") -> dict[str, Any] | None:
+        with self.connect() as conn:
+            conn.execute(
+                """UPDATE crawls SET status = 'paused', pause_reason = ?, next_run_at = NULL
+                   WHERE id = ? AND status IN ('queued', 'retryable')""",
+                (reason, crawl_id),
+            )
+        return self.get_crawl(crawl_id)
+
+    def resume_job(self, crawl_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            conn.execute(
+                """UPDATE crawls SET status = 'queued', attempts = 0, completed_at = NULL, error_message = '', pause_reason = '', next_run_at = ?
+                   WHERE id = ? AND status IN ('paused', 'retryable', 'failed')""",
+                (now(), crawl_id),
+            )
+        return self.get_crawl(crawl_id)
 
     def update_crawl(self, crawl_id: str, **values: Any) -> None:
         if not values:

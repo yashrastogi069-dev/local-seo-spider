@@ -36,6 +36,14 @@ Google also describes structured data as standardized information that helps sys
 
 The product will include a **Content Inventory** view for completed authorized crawls. It groups concrete page evidence by missing or duplicate title, missing or duplicate description, missing H1, thin rendered text, images without alternate text, and structured-data parse errors. It adds an internal-link context count so users can prioritize changes within their own information architecture. It deliberately excludes keyword scraping, backlink harvesting, competitor dataset collection, rank tracking, ad-platform integration, and publishing or changing any production content.
 
+## Queue architecture assessment
+
+Scrapy’s scheduler is a specialized request frontier that can use persistent or in-memory priority queues, track a duplicate filter, and keep pending state on disk through `JOBDIR`.[9] Its own documentation cautions that scheduler persistence files are implementation details, so they should not become the local application’s audit source of truth. The existing SQLite crawl ledger should remain the durable record for authorized crawl configuration, ownership acknowledgement, outcome, page evidence, and issue evidence.
+
+The `scrapy-redis` project offers multiple Scrapy instances a shared Redis request queue, which is explicitly aimed at distributed crawling.[10] That design adds a network service, worker coordination, operational setup, and broader throughput than this single-operator, local-first tool requires. It would also be an additional crawler stack rather than an enhancement to the specified FastAPI, SQLite, Playwright, and HTMX application. It is therefore not a suitable default addition.
+
+RabbitMQ provides delivery acknowledgement and publisher confirmation mechanisms, but it also requires the application to implement idempotence, bounded prefetch, retry limits, and dead-letter behavior to avoid loss, consumer overload, or redelivery loops.[11] Adding it solely to run a bounded local SEO crawl would increase operational failure modes. For the current product, a SQLite-backed, single-worker job state is the appropriate reliable baseline: it preserves recoverable state, avoids another service, and keeps all crawl configuration and evidence local. A future opt-in broker integration should be considered only for a documented, authorized multi-worker environment with a private network, durable job ids, idempotent workers, a per-host concurrency limit of one, bounded retries, and no increase to the authorization or host-scope boundary.
+
 ## Sources
 
 [1]: https://www.screamingfrog.co.uk/seo-spider/ "Screaming Frog SEO Spider Website Crawler"
@@ -46,3 +54,6 @@ The product will include a **Content Inventory** view for completed authorized c
 [6]: https://playwright.dev/python/docs/pages "Playwright Python: Pages"
 [7]: https://developers.google.com/search/docs/appearance/snippet "Google Search Central: Snippets and Meta Descriptions"
 [8]: https://developers.google.com/search/docs/appearance/structured-data/intro-structured-data "Google Search Central: Structured Data Introduction"
+[9]: https://docs.scrapy.org/en/latest/topics/scheduler.html "Scrapy Scheduler"
+[10]: https://github.com/rmax/scrapy-redis "scrapy-redis"
+[11]: https://www.rabbitmq.com/docs/confirms "RabbitMQ Consumer Acknowledgements and Publisher Confirms"

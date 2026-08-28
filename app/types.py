@@ -82,3 +82,19 @@ class CrawlRequest:
             "respect_nofollow": self.respect_nofollow,
             "url_list_count": len(self.url_list),
         }
+
+    def storage_payload(self) -> dict[str, Any]:
+        """Return the complete local-only request needed to resume an approved job."""
+        return asdict(self)
+
+    @classmethod
+    def from_storage_payload(cls, payload: dict[str, Any]) -> "CrawlRequest":
+        return cls(
+            start_url=str(payload["start_url"]),
+            mode=str(payload["mode"]),
+            url_list=[str(url) for url in payload.get("url_list", [])],
+            max_urls=int(payload["max_urls"]),
+            delay_seconds=float(payload["delay_seconds"]),
+            respect_nofollow=bool(payload["respect_nofollow"]),
+            acknowledgment=bool(payload["acknowledgment"]),
+        )

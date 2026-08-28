@@ -44,18 +44,25 @@ Completed crawls of the same normalized start URL can also be compared locally. 
 Browser + HTMX form
        │ explicit ownership/permission acknowledgement
        ▼
-FastAPI request validation ──► SQLite crawl record (local `data/`)
-       │                              │
-       ▼                              ▼
-Bounded same-host crawl        persisted pages, links, issues
-       │                              │
-       ├── robots.txt + request delay │
-       ├── HTTP source + headers      ├── HTML ledger
-       └── Playwright render          ├── Pages CSV / Issues CSV
-                                      └── self-contained HTML report
+FastAPI request validation ──► SQLite job ledger (local `data/`)
+                                      │ queued / running / retryable / paused
+                                      ▼
+                              one local worker claims one approved job
+                                      │
+                                      ▼
+                            bounded same-host crawl and persisted evidence
+                                      │
+                 ┌────────────────────┴────────────────────┐
+                 ▼                                         ▼
+    robots.txt + request delay, HTTP source + headers,    pages, links, issues,
+    Playwright rendered inspection                        CSV exports, HTML report
 ```
 
-`app/crawler.py` owns collection and is deliberately limited to a single host and local crawl settings. `app/parser.py` converts source or rendered HTML into structured records. `app/analyzer.py` is a deterministic transformation from persisted evidence to issue rows. `app/database.py` is the SQLite persistence boundary, while `app/exports.py` writes reproducible local exports. `app/templates/` and `app/static/` provide the Field Manual HTMX interface.
+`app/crawler.py` owns collection and is deliberately limited to a single host and local crawl settings. `app/parser.py` converts source or rendered HTML into structured records. `app/analyzer.py` is a deterministic transformation from persisted evidence to issue rows. `app/database.py` is the SQLite persistence boundary and durable job ledger; it supports safe startup recovery, bounded retry timing, circuit-breaker pauses, and explicit operator resume. `app/exports.py` writes reproducible local exports. `app/templates/` and `app/static/` provide the Field Manual HTMX interface.
+
+### Local worker and recovery behavior
+
+One local worker processes one acknowledged crawl job at a time. The job is written to SQLite before the worker receives it, so a restart does not silently discard a queued request. If the process stops while a job is marked `running`, the next startup changes it to `retryable` instead of pretending it completed. Unexpected worker-level failures are retried only after a bounded delay. After the local maximum attempts, a circuit breaker places the job in `paused`; the operator must review the recorded reason and select **Resume locally**. Normal page-specific fetch and rendering errors remain captured as crawl evidence and do not restart the whole job. See [`docs/LOCAL_JOB_LEDGER.md`](docs/LOCAL_JOB_LEDGER.md) for the exact state model.
 
 ## Safe use and permissions
 
@@ -83,7 +90,7 @@ Run the focused test suite after creating the local environment:
 .venv/bin/python -m pytest
 ```
 
-The tests include a focused transformation test for technical-issue evidence and a FastAPI/HTMX happy path that confirms the permission block, authorized crawl completion, audit rendering, and CSV and HTML exports.
+The tests cover deterministic technical-issue evidence, URL validation and safe filename behavior, robots and redirect handling, recoverable rendering fallback, CSV/HTML export safety, contrast regression, FastAPI security headers, permission blocking, HTMX and non-HTMX form paths, crawl comparison, and durable SQLite job claim/retry/pause/resume/startup-recovery behavior.
 
 ## References
 

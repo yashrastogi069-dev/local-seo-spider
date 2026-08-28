@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -28,13 +28,23 @@ settings = Settings.from_environment(ROOT)
 database = Database(settings.database_path)
 templates = Jinja2Templates(directory=str(ROOT / "app" / "templates"))
 templates.env.filters["visible_url"] = visible_url
-active_crawls = threading.Semaphore(settings.max_concurrent_crawls)
+worker_wake = threading.Event()
+worker_stop = threading.Event()
+worker_thread: threading.Thread | None = None
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     database.initialize()
-    yield
+    database.recover_interrupted_jobs()
+    _start_worker()
+    try:
+        yield
+    finally:
+        worker_stop.set()
+        worker_wake.set()
+        if worker_thread and worker_thread.is_alive():
+            worker_thread.join(timeout=2)
 
 
 app = FastAPI(title="Local SEO Spider", lifespan=lifespan)
@@ -105,19 +115,44 @@ def _parse_request(start_url: str, mode: str, url_list: str, max_urls: str, dela
     return CrawlRequest(normalized_start, mode, parsed_urls, parsed_max, parsed_delay, respect_nofollow == "yes", True)
 
 
-def _run_crawl(crawl_id: str, crawl_request: CrawlRequest) -> None:
-    with active_crawls:
-        database.update_crawl(crawl_id, status="running", started_at=now(), robots_status="checking")
-        def progress(pages_crawled: int, _: int, robots_status: str) -> None:
-            database.update_crawl(crawl_id, pages_crawled=pages_crawled, robots_status=robots_status)
-        try:
-            pages, links, robots_status = CrawlEngine(settings).run(crawl_request, progress)
-            issues = analyze_pages(pages, links, crawl_request.start_url)
-            database.replace_pages_and_links(crawl_id, pages, links)
-            database.replace_issues(crawl_id, issues)
-            database.update_crawl(crawl_id, status="completed", completed_at=now(), robots_status=robots_status, pages_crawled=len(pages), issues_found=len(issues))
-        except Exception as exc:
-            database.update_crawl(crawl_id, status="failed", completed_at=now(), error_message=f"{type(exc).__name__}: {exc}")
+def _run_claimed_crawl(crawl_id: str, crawl_request: CrawlRequest) -> None:
+    """Run a job already claimed by the sole local worker and persist its outcome."""
+    database.update_crawl(crawl_id, robots_status="checking")
+    def progress(pages_crawled: int, _: int, robots_status: str) -> None:
+        database.update_crawl(crawl_id, pages_crawled=pages_crawled, robots_status=robots_status)
+    try:
+        pages, links, robots_status = CrawlEngine(settings).run(crawl_request, progress)
+        issues = analyze_pages(pages, links, crawl_request.start_url)
+        database.replace_pages_and_links(crawl_id, pages, links)
+        database.replace_issues(crawl_id, issues)
+        database.update_crawl(crawl_id, status="completed", completed_at=now(), robots_status=robots_status, pages_crawled=len(pages), issues_found=len(issues), pause_reason="")
+    except Exception as exc:
+        database.defer_or_pause_job(crawl_id, f"{type(exc).__name__}: {exc}")
+
+
+def _worker_loop() -> None:
+    """Claim and execute one approved local job at a time until this process stops."""
+    while not worker_stop.is_set():
+        job = database.claim_next_job()
+        if not job:
+            worker_wake.wait(timeout=1)
+            worker_wake.clear()
+            continue
+        crawl_request = database.get_crawl_request(job["id"])
+        if crawl_request is None:
+            database.update_crawl(job["id"], status="failed", completed_at=now(), error_message="The durable local request payload is unavailable. Resume is blocked until this record is reviewed.")
+            continue
+        _run_claimed_crawl(job["id"], crawl_request)
+
+
+def _start_worker() -> None:
+    """Start exactly one local dispatcher for this FastAPI process."""
+    global worker_thread
+    if worker_thread and worker_thread.is_alive():
+        return
+    worker_stop.clear()
+    worker_thread = threading.Thread(target=_worker_loop, name="local-seo-spider-worker", daemon=True)
+    worker_thread.start()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -128,7 +163,6 @@ def home(request: Request) -> HTMLResponse:
 @app.post("/crawls", response_class=HTMLResponse)
 def create_crawl(
     request: Request,
-    background_tasks: BackgroundTasks,
     start_url: Annotated[str, Form()],
     mode: Annotated[str, Form()] = "site",
     url_list: Annotated[str, Form()] = "",
@@ -144,7 +178,7 @@ def create_crawl(
             return _home_response(request, error=str(exc), status_code=422)
         return templates.TemplateResponse(request, "partials/crawl_form.html", _context(request, error=str(exc), defaults={"url_cap": settings.default_url_cap, "delay": settings.default_delay_seconds, "max_url_cap": settings.max_url_cap}), status_code=422)
     crawl_id = database.create_crawl(crawl_request)
-    background_tasks.add_task(_run_crawl, crawl_id, crawl_request)
+    worker_wake.set()
     if request.headers.get("HX-Request") != "true":
         return RedirectResponse(url=f"/crawls/{crawl_id}", status_code=303)
     return templates.TemplateResponse(request, "partials/crawl_status.html", _context(request, crawl=database.get_crawl(crawl_id)))
@@ -156,6 +190,36 @@ def crawl_status(request: Request, crawl_id: str) -> HTMLResponse:
     if not crawl:
         raise HTTPException(404, "Crawl not found.")
     return templates.TemplateResponse(request, "partials/crawl_status.html", _context(request, crawl=crawl))
+
+
+def _job_control_response(request: Request, crawl: dict[str, object]) -> Response:
+    if request.headers.get("HX-Request") == "true":
+        return templates.TemplateResponse(request, "partials/crawl_status.html", _context(request, crawl=crawl))
+    return RedirectResponse(url=f"/crawls/{crawl['id']}", status_code=303)
+
+
+@app.post("/crawls/{crawl_id}/pause")
+def pause_crawl(request: Request, crawl_id: str) -> Response:
+    crawl = database.get_crawl(crawl_id)
+    if not crawl:
+        raise HTTPException(404, "Crawl not found.")
+    if crawl["status"] not in {"queued", "retryable"}:
+        raise HTTPException(409, "Only a queued or retryable crawl can be paused safely.")
+    updated = database.pause_job(crawl_id)
+    return _job_control_response(request, updated or crawl)
+
+
+@app.post("/crawls/{crawl_id}/resume")
+def resume_crawl(request: Request, crawl_id: str) -> Response:
+    crawl = database.get_crawl(crawl_id)
+    if not crawl:
+        raise HTTPException(404, "Crawl not found.")
+    if crawl["status"] not in {"paused", "retryable", "failed"}:
+        raise HTTPException(409, "Only a paused, retryable, or failed crawl can be resumed.")
+    updated = database.resume_job(crawl_id)
+    if updated:
+        worker_wake.set()
+    return _job_control_response(request, updated or crawl)
 
 
 @app.get("/crawls/{crawl_id}", response_class=HTMLResponse)

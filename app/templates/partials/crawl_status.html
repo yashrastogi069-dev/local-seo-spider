@@ -1,18 +1,24 @@
 <!-- Field Manual: crawl status stays visible and only this panel refreshes. -->
-{% if crawl.status in ['queued', 'running'] %}
+{% if crawl.status in ['queued', 'running', 'retryable'] %}
 <section class="crawl-progress" hx-get="/crawls/{{ crawl.id }}/status" hx-trigger="every 2s" hx-swap="outerHTML" aria-live="polite">
-  <div class="progress-head"><span class="spinner" aria-hidden="true"></span><div><p class="eyebrow">INSPECTION ACTIVE</p><h2>Reading the crawl frontier.</h2></div><span class="stamp">{{ crawl.robots_status|upper }}</span></div>
+  <div class="progress-head"><span class="spinner" aria-hidden="true"></span><div><p class="eyebrow">{% if crawl.status == 'queued' %}LOCAL JOB QUEUED{% elif crawl.status == 'retryable' %}RECOVERY WINDOW{% else %}INSPECTION ACTIVE{% endif %}</p><h2>{% if crawl.status == 'queued' %}Waiting for the local worker.{% elif crawl.status == 'retryable' %}Holding before a conservative retry.{% else %}Reading the crawl frontier.{% endif %}</h2></div><span class="stamp">{{ crawl.robots_status|upper }}</span></div>
   <div class="progress-rule"><span style="width: {{ [crawl.pages_crawled * 100 // crawl.settings.max_urls, 100]|min }}%"></span></div>
-  <div class="progress-meta"><span><strong>{{ crawl.pages_crawled }}</strong> pages inspected</span><span>Cap: {{ crawl.settings.max_urls }}</span><span>Delay: {{ crawl.settings.delay_seconds }} sec</span></div>
-  <p>Do not close this page while the crawl is active. The result will remain in your local crawl ledger when complete.</p>
+  <div class="progress-meta"><span><strong>{{ crawl.pages_crawled }}</strong> pages inspected</span><span>Attempt: {{ crawl.attempts }} / {{ crawl.max_attempts }}</span><span>Cap: {{ crawl.settings.max_urls }}</span><span>Delay: {{ crawl.settings.delay_seconds }} sec</span></div>
+  {% if crawl.status == 'retryable' %}<p>{{ crawl.pause_reason }}{% if crawl.next_run_at %} Next local retry: <strong>{{ crawl.next_run_at }}</strong>.{% endif %}</p>{% elif crawl.status == 'queued' %}<p>One local worker processes approved jobs sequentially. This preserves the exact crawl boundary and prevents concurrent host pressure.</p>{% else %}<p>Do not close this page while the crawl is active. The result will remain in your local crawl ledger when complete.</p>{% endif %}
+  {% if crawl.status in ['queued', 'retryable'] %}<form class="inline-control" method="post" action="/crawls/{{ crawl.id }}/pause" hx-post="/crawls/{{ crawl.id }}/pause" hx-target="closest section" hx-swap="outerHTML"><button class="quiet-button" type="submit">Pause locally</button></form>{% endif %}
 </section>
 {% elif crawl.status == 'completed' %}
 <section class="crawl-success" aria-live="polite">
   <div><span class="status-check" aria-hidden="true">✓</span><p class="eyebrow">INSPECTION COMPLETE</p><h2>{{ crawl.pages_crawled }} pages captured. {{ crawl.issues_found }} issues prioritized.</h2><p>Robots state: <strong>{{ crawl.robots_status }}</strong>. The evidence and exports are ready locally.</p></div>
   <a class="button-link" href="/crawls/{{ crawl.id }}">Open audit ledger <span aria-hidden="true">→</span></a>
 </section>
+{% elif crawl.status == 'paused' %}
+<section class="crawl-paused" role="status" aria-live="polite">
+  <div><p class="eyebrow">LOCAL JOB PAUSED</p><h2>Worker activity is stopped for this crawl.</h2><p>{{ crawl.pause_reason or 'This authorized crawl is paused until you review and resume it.' }}</p><p><strong>Attempts:</strong> {{ crawl.attempts }} / {{ crawl.max_attempts }}.</p></div>
+  <form method="post" action="/crawls/{{ crawl.id }}/resume" hx-post="/crawls/{{ crawl.id }}/resume" hx-target="closest section" hx-swap="outerHTML"><button class="button-link" type="submit">Resume locally <span aria-hidden="true">→</span></button></form>
+</section>
 {% else %}
 <section class="crawl-failed" role="alert">
-  <p class="eyebrow">RECOVERABLE CRAWL ERROR</p><h2>The inspection did not complete.</h2><p>{{ crawl.error_message or 'An unexpected local error occurred.' }}</p><a class="button-link secondary" href="/">Return to the crawl request</a>
+  <p class="eyebrow">RECOVERABLE CRAWL ERROR</p><h2>The inspection did not complete.</h2><p>{{ crawl.error_message or 'An unexpected local error occurred.' }}</p><form method="post" action="/crawls/{{ crawl.id }}/resume" hx-post="/crawls/{{ crawl.id }}/resume" hx-target="closest section" hx-swap="outerHTML"><button class="button-link secondary" type="submit">Review and resume locally</button></form>
 </section>
 {% endif %}

@@ -74,3 +74,26 @@ def test_authorized_crawl_renders_audit_and_exports(tmp_path, monkeypatch) -> No
         }, headers={"HX-Request": "false"}, follow_redirects=False)
         assert fallback.status_code == 303
         assert fallback.headers["location"].startswith("/crawls/")
+
+
+def test_operator_can_pause_and_resume_a_queued_local_job(tmp_path, monkeypatch) -> None:
+    local_settings = replace(main.settings, data_dir=tmp_path / "data", render_enabled=False)
+    monkeypatch.setattr(main, "settings", local_settings)
+    monkeypatch.setattr(main, "database", Database(local_settings.database_path))
+    monkeypatch.setattr(main, "_start_worker", lambda: None)
+
+    with TestClient(main.app) as client:
+        created = client.post("/crawls", data={
+            "start_url": "https://owned.example/", "mode": "site", "url_list": "", "max_urls": "5", "delay_seconds": "0.1",
+            "respect_nofollow": "yes", "authorization_acknowledgment": "yes",
+        }, headers={"HX-Request": "true"})
+        assert created.status_code == 200 and "LOCAL JOB QUEUED" in created.text
+        crawl_id = main.database.list_crawls()[0]["id"]
+
+        paused = client.post(f"/crawls/{crawl_id}/pause", headers={"HX-Request": "true"})
+        assert paused.status_code == 200 and "LOCAL JOB PAUSED" in paused.text
+        assert main.database.get_crawl(crawl_id)["status"] == "paused"
+
+        resumed = client.post(f"/crawls/{crawl_id}/resume", headers={"HX-Request": "true"})
+        assert resumed.status_code == 200 and "LOCAL JOB QUEUED" in resumed.text
+        assert main.database.get_crawl(crawl_id)["status"] == "queued"
