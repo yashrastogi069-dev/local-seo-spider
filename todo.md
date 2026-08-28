@@ -20,10 +20,10 @@
 - [x] Provide a step-by-step explanation of the completed crawler and validation results.
 - [x] Measure rendered text and status-color contrast against their actual surfaces and correct any verified failures.
 - [x] Complete the standards-focused refinement and verification pass, then synchronize the final state to the private GitHub repository.
-- [ ] Research diverse authorized-site crawler failure modes and translate them into recoverable local controls.
-- [ ] Add robust retries, response-size protection, content-type handling, and non-stalling crawl status behavior.
-- [ ] Validate the hardened crawler against local adversarial fixtures for robots, timeouts, redirects, invalid HTML, non-HTML, and rendering failures.
-- [ ] Push the validated reliability hardening to the private GitHub repository.
+- [x] Research diverse authorized-site crawler failure modes and translate them into recoverable local controls.
+- [x] Add robust retries, response-size protection, content-type handling, and non-stalling crawl status behavior.
+- [x] Validate the hardened crawler against local adversarial fixtures for robots, timeouts, redirects, invalid HTML, non-HTML, and rendering failures.
+- [x] Push the validated reliability hardening to the private GitHub repository.
 - [x] Review persistent workload guidance and assess a locally controlled queue design for authorized crawl jobs.
 - [x] Implement and test only the queueing improvements that preserve local-first storage, permission gating, and bounded crawl behavior.
 - [x] Add a durable SQLite job ledger with queued, running, paused, retryable, completed, and failed states for authorized crawl jobs.

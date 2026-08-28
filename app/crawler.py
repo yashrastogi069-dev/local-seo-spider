@@ -38,18 +38,32 @@ class CrawlEngine:
     def _fetch(self, client: httpx.Client, url: str) -> tuple[httpx.Response | None, list[dict[str, object]], str]:
         current = url
         hops: list[dict[str, object]] = []
+        transient_statuses = {408, 425, 429, 500, 502, 503, 504}
         for _ in range(self.settings.max_redirects + 1):
-            try:
-                response = client.get(current, follow_redirects=False)
-            except httpx.HTTPError as exc:
-                return None, hops, f"{type(exc).__name__}: {exc}"
-            hops.append({"url": current, "status_code": response.status_code, "location": response.headers.get("location", "")})
+            response: httpx.Response | None = None
+            for attempt in range(self.settings.max_request_retries + 1):
+                try:
+                    response = client.get(current, follow_redirects=False)
+                except httpx.HTTPError as exc:
+                    if attempt >= self.settings.max_request_retries:
+                        return None, hops, f"{type(exc).__name__} after {attempt + 1} attempt(s): {exc}"
+                    time.sleep(self.settings.retry_backoff_seconds * (2 ** attempt))
+                    continue
+                hops.append({"url": current, "status_code": response.status_code, "location": response.headers.get("location", ""), "attempt": attempt + 1})
+                if response.status_code in transient_statuses and attempt < self.settings.max_request_retries:
+                    time.sleep(self.settings.retry_backoff_seconds * (2 ** attempt))
+                    continue
+                break
+            if response is None:
+                return None, hops, "Request ended without a response."
             if response.is_redirect and response.headers.get("location"):
                 try:
                     current = normalize_url(response.headers["location"], current)
                 except UrlValidationError:
                     return response, hops, "Redirect location could not be normalized."
                 continue
+            if response.status_code in transient_statuses:
+                return response, hops, f"Transient HTTP status {response.status_code} remained after {self.settings.max_request_retries + 1} attempt(s)."
             return response, hops, ""
         return response, hops, f"Redirect limit ({self.settings.max_redirects}) exceeded."
 

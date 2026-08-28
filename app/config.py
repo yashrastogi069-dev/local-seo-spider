@@ -24,6 +24,8 @@ class Settings:
     render_timeout_ms: int
     max_redirects: int
     max_document_bytes: int
+    max_request_retries: int
+    retry_backoff_seconds: float
     max_concurrent_crawls: int
     render_enabled: bool
 
@@ -47,6 +49,8 @@ class Settings:
             render_timeout_ms=int(os.getenv("SPIDER_RENDER_TIMEOUT_SECONDS", "25000")),
             max_redirects=int(os.getenv("SPIDER_MAX_REDIRECTS", "8")),
             max_document_bytes=int(os.getenv("SPIDER_MAX_DOCUMENT_BYTES", "2097152")),
+            max_request_retries=max(0, min(3, int(os.getenv("SPIDER_MAX_REQUEST_RETRIES", "2")))),
+            retry_backoff_seconds=max(0.1, min(30.0, float(os.getenv("SPIDER_RETRY_BACKOFF_SECONDS", "0.5")))),
             max_concurrent_crawls=max(1, int(os.getenv("SPIDER_MAX_CONCURRENT_CRAWLS", "1"))),
             render_enabled=_as_bool(os.getenv("SPIDER_RENDER_ENABLED", "true")),
         )
