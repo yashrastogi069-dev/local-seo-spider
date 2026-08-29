@@ -54,7 +54,10 @@
 - [x] Expand authorized acquisition and parsing for HTML, rendered DOM, PDFs, text resources, and unsupported-content evidence with explicit limits; image OCR remains a documented partial-support boundary.
 - [x] Build a complete local knowledge corpus with provenance, versioning, refresh, and crawl comparison.
 - [x] Validate end-to-end retrieval and answer grounding before adding generative RAG.
-- [ ] Design and implement hybrid lexical/vector RAG with local embeddings, chunking, vector storage, reranking, and citations.
+- [x] Design and implement hybrid lexical/vector RAG with local embeddings, chunking, vector storage, reranking, and citations.
+- [x] Add optional local Sentence Transformers embedding installation and model metadata without changing the offline default.
+- [x] Add optional local answer synthesis with strict evidence-only prompting and deterministic fallback.
 - [ ] Add agentic RAG planning, confidence, abstention, evaluation, and recovery controls.
+- [ ] Add retrieval evaluation fixtures and confidence calibration against grounded and unrelated questions.
 - [ ] Design and implement safe n8n-like nodes, triggers, workflow runs, and local database adapters after the RAG layer is stable.
 - [ ] Run full adversarial tests, document exact local usage, and synchronize every milestone to private GitHub.

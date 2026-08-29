@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from array import array
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
 
+from app.embeddings import EmbeddingProvider, HashEmbeddingProvider, cosine_similarity
 from app.knowledge import KnowledgeChunk
 from app.types import CrawlRequest, IssueRecord, LinkRecord, PageRecord
 
@@ -77,6 +79,12 @@ class Database:
                 CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
                   chunk_id UNINDEXED, crawl_id UNINDEXED, url, title, heading_path, content
                 );
+                CREATE TABLE IF NOT EXISTS vector_embeddings (
+                  chunk_id INTEGER PRIMARY KEY REFERENCES knowledge_chunks(id) ON DELETE CASCADE,
+                  crawl_id TEXT NOT NULL REFERENCES crawls(id) ON DELETE CASCADE,
+                  provider TEXT NOT NULL, dimension INTEGER NOT NULL, embedding BLOB NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_vectors_crawl ON vector_embeddings(crawl_id);
                 """
             )
             self._ensure_crawl_columns(conn)
@@ -255,11 +263,13 @@ class Database:
                 [(crawl_id, issue.rule_key, issue.severity, issue.title, issue.url, issue.evidence, issue.remediation, issue.fingerprint) for issue in issues],
             )
 
-    def replace_knowledge_chunks(self, crawl_id: str, chunks: Iterable[KnowledgeChunk]) -> None:
-        """Replace one crawl's local knowledge index and its FTS rows atomically."""
+    def replace_knowledge_chunks(self, crawl_id: str, chunks: Iterable[KnowledgeChunk], embedder: EmbeddingProvider | None = None) -> None:
+        """Replace one crawl's local lexical and vector indexes atomically."""
         materialized = list(chunks)
+        active_embedder = embedder or HashEmbeddingProvider()
         with self.connect() as conn:
             conn.execute("DELETE FROM knowledge_fts WHERE crawl_id = ?", (crawl_id,))
+            conn.execute("DELETE FROM vector_embeddings WHERE crawl_id = ?", (crawl_id,))
             conn.execute("DELETE FROM knowledge_chunks WHERE crawl_id = ?", (crawl_id,))
             for chunk in materialized:
                 cursor = conn.execute(
@@ -271,6 +281,12 @@ class Database:
                     """INSERT INTO knowledge_fts (chunk_id, crawl_id, url, title, heading_path, content)
                        VALUES (?, ?, ?, ?, ?, ?)""",
                     (cursor.lastrowid, crawl_id, chunk.url, chunk.title, chunk.heading_path, chunk.content),
+                )
+                embedding = array("f", active_embedder.embed(chunk.content))
+                conn.execute(
+                    """INSERT INTO vector_embeddings (chunk_id, crawl_id, provider, dimension, embedding)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (cursor.lastrowid, crawl_id, active_embedder.name, len(embedding), embedding.tobytes()),
                 )
 
     def get_knowledge_chunks(self, crawl_id: str) -> list[dict[str, Any]]:
@@ -285,6 +301,47 @@ class Database:
         with self.connect() as conn:
             row = conn.execute("SELECT COUNT(*) AS count FROM knowledge_chunks WHERE crawl_id = ?", (crawl_id,)).fetchone()
         return int(row["count"]) if row else 0
+
+    def vector_count(self, crawl_id: str) -> int:
+        with self.connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS count FROM vector_embeddings WHERE crawl_id = ?", (crawl_id,)).fetchone()
+        return int(row["count"]) if row else 0
+
+    def search_hybrid_knowledge(self, crawl_id: str, query: str, limit: int = 6, embedder: EmbeddingProvider | None = None) -> list[dict[str, Any]]:
+        """Fuse FTS5 and cosine retrieval using reciprocal-rank fusion."""
+        lexical = self.search_knowledge(crawl_id, query, max(limit * 3, 12))
+        lexical_rank = {int(item["id"]): position for position, item in enumerate(lexical, start=1)}
+        active_embedder = embedder or HashEmbeddingProvider()
+        query_vector = active_embedder.embed(query)
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT k.id, k.page_id, k.url, k.title, k.heading_path, k.content, v.embedding
+                   FROM vector_embeddings v JOIN knowledge_chunks k ON k.id = v.chunk_id
+                   WHERE v.crawl_id = ? AND v.dimension = ?""",
+                (crawl_id, len(query_vector)),
+            ).fetchall()
+        vector_candidates = []
+        for row in rows:
+            similarity = cosine_similarity(query_vector, array("f", row["embedding"]))
+            # Feature hashing is lexical, not semantic: do not let random hash collisions answer an unrelated question.
+            if active_embedder.name == "hash" and not lexical:
+                continue
+            if active_embedder.name != "hash" and similarity < 0.35:
+                continue
+            item = dict(row)
+            item.pop("embedding", None)
+            item["vector_similarity"] = similarity
+            vector_candidates.append((item, similarity))
+        vector_ranked = sorted(vector_candidates, key=lambda item: item[1], reverse=True)
+        vector_rank = {int(item[0]["id"]): position for position, item in enumerate(vector_ranked, start=1)}
+        candidates = {int(item["id"]): item for item in lexical}
+        candidates.update({int(item[0]["id"]): item[0] for item in vector_ranked})
+        scored = []
+        for chunk_id, item in candidates.items():
+            score = (1 / (60 + lexical_rank[chunk_id]) if chunk_id in lexical_rank else 0) + (1 / (60 + vector_rank[chunk_id]) if chunk_id in vector_rank else 0)
+            scored.append((score, item))
+        scored.sort(key=lambda item: (-item[0], str(item[1].get("url", "")), int(item[1].get("chunk_index", 0))))
+        return [dict(item, hybrid_score=score, retrieval_mode="hybrid") for score, item in scored[: max(1, min(limit, 20))]]
 
     def search_knowledge(self, crawl_id: str, query: str, limit: int = 6) -> list[dict[str, Any]]:
         """Search only one crawl and return ranked passages with verifiable provenance."""

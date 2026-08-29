@@ -20,7 +20,10 @@ from app.knowledge import compare_knowledge, extract_pages_knowledge
 from app.qa import answer_question
 from app.config import Settings
 from app.crawler import CrawlEngine
+from app.agentic import agentic_retrieve
+from app.answering import LocalAnswerer
 from app.database import Database, now
+from app.embeddings import build_embedding_provider
 from app.exports import write_csv_exports, write_html_report
 from app.types import CrawlRequest
 from app.urltools import UrlValidationError, is_same_host, normalize_url, visible_url
@@ -129,7 +132,7 @@ def _run_claimed_crawl(crawl_id: str, crawl_request: CrawlRequest) -> None:
         issues = analyze_pages(pages, links, crawl_request.start_url)
         database.replace_pages_and_links(crawl_id, pages, links)
         stored_pages = database.get_pages(crawl_id)
-        database.replace_knowledge_chunks(crawl_id, extract_pages_knowledge(stored_pages, crawl_id))
+        database.replace_knowledge_chunks(crawl_id, extract_pages_knowledge(stored_pages, crawl_id), _embedding_provider())
         database.replace_issues(crawl_id, issues)
         database.update_crawl(crawl_id, status="completed", completed_at=now(), robots_status=robots_status, pages_crawled=len(pages), issues_found=len(issues), pause_reason="")
     except Exception as exc:
@@ -252,10 +255,35 @@ def crawl_comparison(request: Request, crawl_id: str, baseline_id: str) -> HTMLR
     return templates.TemplateResponse(request, "crawl_comparison.html", _context(request, crawl=current, baseline=baseline, comparison=comparison))
 
 
+def _embedding_provider():
+    try:
+        return build_embedding_provider(settings.embedding_provider, settings.embedding_model, settings.embedding_dimension)
+    except Exception:
+        # A missing optional semantic model never blocks local crawling; hash retrieval remains available.
+        return build_embedding_provider("hash", dimension=settings.embedding_dimension)
+
+
+def _search_knowledge(crawl_id: str, query: str, limit: int = 6) -> list[dict[str, object]]:
+    return agentic_retrieve(crawl_id, query, lambda cid, subquery, sublimit: database.search_hybrid_knowledge(cid, subquery, sublimit, _embedding_provider()), limit)
+
+
+def _answer_generator():
+    if settings.answer_provider.strip().lower() not in {"ollama", "local-model", "local_model"}:
+        return None
+    try:
+        return LocalAnswerer(settings.ollama_url, settings.ollama_model, settings.answer_timeout_seconds)
+    except Exception:
+        return None
+
+
+def _answer_question(crawl_id: str, question: str) -> dict[str, object]:
+    return answer_question(crawl_id, question, _search_knowledge, generator=_answer_generator())
+
+
 def _reindex_knowledge(crawl_id: str) -> int:
     stored_pages = database.get_pages(crawl_id)
     chunks = extract_pages_knowledge(stored_pages, crawl_id)
-    database.replace_knowledge_chunks(crawl_id, chunks)
+    database.replace_knowledge_chunks(crawl_id, chunks, _embedding_provider())
     return len(chunks)
 
 
@@ -288,7 +316,7 @@ def ask_crawl_api(crawl_id: str, q: str = "") -> dict[str, object]:
     crawl = database.get_crawl(crawl_id)
     if not crawl or crawl["status"] != "completed":
         raise HTTPException(404, "A completed crawl is required for questions.")
-    return answer_question(crawl_id, q, database.search_knowledge)
+    return _answer_question(crawl_id, q)
 
 
 @app.post("/crawls/{crawl_id}/ask", response_class=HTMLResponse)
@@ -296,7 +324,7 @@ def ask_crawl(request: Request, crawl_id: str, question: Annotated[str, Form()] 
     crawl = database.get_crawl(crawl_id)
     if not crawl or crawl["status"] != "completed":
         raise HTTPException(404, "A completed crawl is required for questions.")
-    result = answer_question(crawl_id, question, database.search_knowledge)
+    result = _answer_question(crawl_id, question)
     return templates.TemplateResponse(request, "partials/knowledge_answer.html", _context(request, result=result, crawl=crawl))
 
 

@@ -49,6 +49,24 @@ def test_search_is_crawl_scoped_and_answer_abstains_without_evidence(tmp_path: P
     assert unknown["citations"] == []
 
 
+def test_hybrid_retrieval_persists_vectors_and_keeps_answer_grounded(tmp_path: Path) -> None:
+    database = Database(tmp_path / "hybrid.sqlite")
+    database.initialize()
+    crawl_id = database.create_crawl(CrawlRequest("https://owned.example/", "site", max_urls=5, acknowledgment=True))
+    database.replace_pages_and_links(crawl_id, [page()], [])
+    chunks = extract_knowledge_chunks(database.get_pages(crawl_id)[0], crawl_id)
+    database.replace_knowledge_chunks(crawl_id, chunks)
+
+    assert database.vector_count(crawl_id) == len(chunks)
+    matches = database.search_hybrid_knowledge(crawl_id, "training workshops")
+    assert matches
+    assert matches[0]["retrieval_mode"] == "hybrid"
+    assert matches[0]["url"] == "https://owned.example/services"
+    unknown = answer_question(crawl_id, "What is the moon made of?", database.search_hybrid_knowledge)
+    assert unknown["grounded"] is False
+    assert unknown["citations"] == []
+
+
 def test_knowledge_comparison_and_non_html_empty_state() -> None:
     current = [{"url": "https://owned.example/", "heading_path": "Home", "content": "New text", "title": "Home"}]
     baseline = [{"url": "https://owned.example/", "heading_path": "Home", "content": "Old text", "title": "Home"}]

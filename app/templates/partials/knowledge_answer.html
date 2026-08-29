@@ -2,6 +2,7 @@
   <div class="answer-label">{% if result.grounded %}EVIDENCE-BACKED RESULT{% else %}INSUFFICIENT EVIDENCE{% endif %}</div>
   <h3>{{ result.question or 'Website question' }}</h3>
   <p class="answer-copy">{{ result.answer }}</p>
+  {% if result.grounded %}<div class="answer-meta">Confidence: <strong>{{ result.confidence }}</strong> · {{ result.retrieval_mode }} · {{ result.answer_mode }}</div>{% endif %}
   {% if result.citations %}
   <div class="citation-list" aria-label="Answer citations">
     {% for citation in result.citations %}

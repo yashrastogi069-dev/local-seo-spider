@@ -6,9 +6,10 @@ from typing import Any, Callable
 
 
 SearchFn = Callable[[str, str, int], list[dict[str, Any]]]
+AnswerGenerator = Callable[[str, list[dict[str, Any]]], str]
 
 
-def answer_question(crawl_id: str, question: str, search: SearchFn, limit: int = 6) -> dict[str, Any]:
+def answer_question(crawl_id: str, question: str, search: SearchFn, limit: int = 6, generator: AnswerGenerator | None = None) -> dict[str, Any]:
     """Return a deterministic, citation-backed answer without inventing unsupported facts."""
     cleaned = " ".join(question.split())
     if len(cleaned) < 3:
@@ -36,9 +37,21 @@ def answer_question(crawl_id: str, question: str, search: SearchFn, limit: int =
             "page_id": result.get("page_id"),
         })
 
+    top_score = float(results[0].get("agentic_score", results[0].get("hybrid_score", 0.0))) if results else 0.0
+    confidence = min(0.99, max(0.2, 0.35 + top_score * 12))
+    generated = ""
+    if generator:
+        try:
+            generated = generator(cleaned, results).strip()
+        except Exception:
+            # Optional local synthesis must never erase a usable, deterministic answer.
+            generated = ""
     return {
         "question": cleaned,
-        "answer": "I found the following evidence in the local crawl. Verify the cited passages before treating them as a final answer:\n\n" + "\n".join(evidence_lines),
+        "answer": generated or "I found the following evidence in the local crawl. Verify the cited passages before treating them as a final answer:\n\n" + "\n".join(evidence_lines),
         "grounded": True,
         "citations": citations,
+        "answer_mode": "local-model" if generated else "evidence",
+        "confidence": round(confidence, 2),
+        "retrieval_mode": "agentic-hybrid",
     }

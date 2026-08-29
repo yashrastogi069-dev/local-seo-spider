@@ -52,7 +52,7 @@ Completed crawls of the same normalized start URL can also be compared locally. 
 
 ## Local website knowledge and grounded questions
 
-Completed crawls now build a local SQLite FTS5 knowledge index from readable HTML blocks. Each indexed passage retains its crawl, page, URL, title, and heading path, so the question surface can show where evidence came from. Open a completed crawl and use **Ask the local crawl** to search the indexed website content. The answer mode is deliberately citation-first: it returns matching passages and abstains when the local crawl does not contain enough evidence. It does not invent facts, infer private content, or treat search ranking as proof. The **Rebuild local index** action can recover an index for an older completed crawl after parser improvements or a partial failure, and completed crawls can compare added and removed evidence chunks.
+Completed crawls now build a local SQLite FTS5 knowledge index from readable HTML blocks, text resources, and text-layer PDFs. Each indexed passage retains its crawl, page, URL, title, and heading path, so the question surface can show where evidence came from. Open a completed crawl and use **Ask the local crawl** to search the indexed website content. Retrieval now combines lexical FTS5 ranking with deterministic local vector embeddings and a bounded agentic query planner; the default hash embedding is offline and reproducible, while Sentence Transformers is an optional local semantic provider. The answer mode is deliberately citation-first: it returns matching passages, confidence metadata, and abstains when the local crawl does not contain enough evidence. It does not invent facts, infer private content, or treat similarity as proof. The **Rebuild local index** action can recover an index for an older completed crawl after parser improvements or a partial failure, and completed crawls can compare added and removed evidence chunks.
 
 A read-only JSON endpoint is also available for local workflow experiments:
 
@@ -66,7 +66,7 @@ The endpoint is scoped to one completed crawl and returns the question, grounded
 
 The knowledge layer is designed so an automation tool such as n8n can later call the read-only question endpoint or receive explicit crawl-completed events. The current `/api/crawls/<crawl-id>/ask` endpoint is read-only and local. n8n supports webhook triggers and API-style responses, but any future integration must add explicit authentication, request validation, idempotency, local-network exposure controls, and operator approval. The default application remains local-only and does not connect to n8n or send crawl data anywhere.
 
-A natural-language generator can be added later as an opt-in layer. To preserve the local-only promise, the preferred design is a model running on the same computer; any hosted model would require a separate, explicit privacy decision because website passages would leave the machine. Retrieval and citations remain the source of truth either way.
+An optional local answer generator is now supported through a loopback-only Ollama-compatible endpoint. Set `SPIDER_ANSWER_PROVIDER=ollama` and configure the local model settings in `.env` only after installing and running the model locally. If the model is unavailable, the application falls back to deterministic evidence output. Hosted models remain intentionally unsupported by default because website passages would leave the machine; retrieval and citations remain the source of truth either way.
 
 ## Architecture
 
@@ -91,7 +91,7 @@ FastAPI request validation ──► SQLite job ledger (local `data/`)
         SQLite FTS5 knowledge chunks ──► cited local questions / read-only API
 ```
 
-`app/crawler.py` owns collection and is deliberately limited to a single host and local crawl settings. `app/parser.py` converts source or rendered HTML into structured records. `app/documents.py` extracts bounded text-like resources and text-layer PDFs with explicit partial-support errors. `app/knowledge.py` extracts citation-preserving readable chunks. `app/qa.py` answers from retrieved local evidence and abstains when support is insufficient. `app/analyzer.py` is a deterministic transformation from persisted evidence to issue rows. `app/database.py` is the SQLite persistence boundary and durable job ledger; it supports safe startup recovery, bounded retry timing, circuit-breaker pauses, explicit operator resume, and FTS5 knowledge retrieval. `app/exports.py` writes reproducible local exports. `app/templates/` and `app/static/` provide the Field Manual HTMX interface.
+`app/crawler.py` owns collection and is deliberately limited to a single host and local crawl settings. `app/parser.py` converts source or rendered HTML into structured records. `app/documents.py` extracts bounded text-like resources and text-layer PDFs with explicit partial-support errors. `app/knowledge.py` extracts citation-preserving readable chunks. `app/embeddings.py` provides deterministic offline vectors and an optional local Sentence Transformers adapter. `app/agentic.py` provides bounded query planning. `app/qa.py` answers from retrieved local evidence and abstains when support is insufficient; `app/answering.py` provides the optional loopback-only local model adapter. `app/analyzer.py` is a deterministic transformation from persisted evidence to issue rows. `app/database.py` is the SQLite persistence boundary and durable job ledger; it supports safe startup recovery, bounded retry timing, circuit-breaker pauses, explicit operator resume, FTS5 retrieval, vector persistence, and hybrid ranking. `app/exports.py` writes reproducible local exports. `app/templates/` and `app/static/` provide the Field Manual HTMX interface.
 
 ### Local worker and recovery behavior
 
@@ -123,7 +123,7 @@ Run the focused test suite after creating the local environment:
 .venv/bin/python -m pytest
 ```
 
-The tests cover deterministic technical-issue evidence, URL validation and safe filename behavior, robots and redirect handling, recoverable rendering fallback, CSV/HTML export safety, contrast regression, FastAPI security headers, permission blocking, HTMX and non-HTMX form paths, crawl comparison, durable SQLite job claim/retry/pause/resume/startup-recovery behavior, knowledge chunk provenance, crawl-scoped FTS5 retrieval, citation-first answers, abstention, and the completed-crawl question endpoint.
+The tests cover deterministic technical-issue evidence, URL validation and safe filename behavior, robots and redirect handling, recoverable rendering fallback, bounded PDF/text extraction, CSV/HTML export safety, contrast regression, FastAPI security headers, permission blocking, HTMX and non-HTMX form paths, crawl comparison, durable SQLite job claim/retry/pause/resume/startup-recovery behavior, knowledge chunk provenance, crawl-scoped FTS5/vector hybrid retrieval, bounded agentic planning, citation-first answers, local-model fallback, abstention, and the completed-crawl question endpoint.
 
 ## References
 

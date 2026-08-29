@@ -28,6 +28,13 @@ class Settings:
     retry_backoff_seconds: float
     max_concurrent_crawls: int
     render_enabled: bool
+    embedding_provider: str = "hash"
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_dimension: int = 384
+    answer_provider: str = "evidence"
+    ollama_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "llama3.2"
+    answer_timeout_seconds: float = 45.0
 
     @property
     def database_path(self) -> Path:
@@ -53,4 +60,11 @@ class Settings:
             retry_backoff_seconds=max(0.1, min(30.0, float(os.getenv("SPIDER_RETRY_BACKOFF_SECONDS", "0.5")))),
             max_concurrent_crawls=max(1, int(os.getenv("SPIDER_MAX_CONCURRENT_CRAWLS", "1"))),
             render_enabled=_as_bool(os.getenv("SPIDER_RENDER_ENABLED", "true")),
+            embedding_provider=os.getenv("SPIDER_EMBEDDING_PROVIDER", "hash"),
+            embedding_model=os.getenv("SPIDER_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
+            embedding_dimension=max(8, min(4096, int(os.getenv("SPIDER_EMBEDDING_DIMENSION", "384")))),
+            answer_provider=os.getenv("SPIDER_ANSWER_PROVIDER", "evidence"),
+            ollama_url=os.getenv("SPIDER_OLLAMA_URL", "http://127.0.0.1:11434"),
+            ollama_model=os.getenv("SPIDER_OLLAMA_MODEL", "llama3.2"),
+            answer_timeout_seconds=max(5.0, min(180.0, float(os.getenv("SPIDER_ANSWER_TIMEOUT_SECONDS", "45")))),
         )

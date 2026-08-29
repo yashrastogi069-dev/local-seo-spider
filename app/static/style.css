@@ -133,6 +133,7 @@ button:active,.button-link:active { transform:scale(.96); }
 .answer-label { margin-bottom: 7px; color: var(--amber); font: 700 10px ui-monospace, monospace; letter-spacing: .08em; }
 .knowledge-answer h3 { margin-bottom: 9px; }
 .answer-copy { white-space: pre-line; margin: 0; color: #46554f; font-size: 13px; }
+.answer-meta { margin-top: 12px; color: var(--muted); font: 11px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .04em; }
 .citation-list { display: grid; gap: 8px; margin-top: 16px; }
 .citation { display: grid; gap: 2px; padding: 9px 11px; color: var(--spruce); background: rgb(255 255 255 / .75); border: 1px solid var(--line); text-decoration: none; }
 .citation:hover { border-color: var(--amber); background: var(--white); }
