@@ -7,7 +7,7 @@ import pytest
 
 from app.config import Settings
 from app.crawler import CrawlEngine
-from app.exports import write_csv_exports, write_html_report
+from app.exports import write_csv_exports, write_html_report, write_json_exports
 from app.parser import extract_page_signals
 from app.types import CrawlRequest
 from app.urltools import UrlValidationError, is_same_host, normalize_url, safe_filename
@@ -24,6 +24,25 @@ def sample_page() -> dict[str, object]:
         "meta_robots": "", "x_robots": "", "robots_allowed": True, "internal_inlinks": 1, "rendered_text": "local rendered copy",
         "images": [{"has_alt": False, "alt": ""}], "structured_data": [{"types": ["Article"]}], "fetch_error": "", "render_error": "",
     }
+
+
+def test_profile_fields_flow_into_page_records_and_json_exports(tmp_path: Path) -> None:
+    profile = tmp_path / "profile.json"
+    profile.write_text('{"name":"fixture","fields":[{"name":"sku","selector":"[data-sku]","attribute":"data-sku"}]}', encoding="utf-8")
+    settings = Settings(
+        data_dir=tmp_path, user_agent="LocalSEOSpider/Test", default_url_cap=5, max_url_cap=10,
+        default_delay_seconds=0.1, request_timeout_seconds=2, render_timeout_ms=1_000, max_redirects=2,
+        max_document_bytes=20_000, max_request_retries=0, retry_backoff_seconds=0.1, max_concurrent_crawls=1,
+        render_enabled=False, extraction_profile_path=profile,
+    )
+    engine = CrawlEngine(settings)
+    request = CrawlRequest("https://owned.example/", "list", ["https://owned.example/"], 1, 0.1, True, True)
+    response = httpx.Response(200, headers={"content-type": "text/html"}, text='<html><body><div data-sku="A-1">Item</div></body></html>', request=httpx.Request("GET", "https://owned.example/"))
+    page, _ = engine._build_page(request, request.start_url, response, [], "")
+    assert page.extracted_fields["fields"]["sku"]["values"] == ["A-1"]
+    exports = write_json_exports(tmp_path, sample_crawl(), [page.to_dict()], [])
+    assert '"extracted_fields"' in exports["pages"].read_text(encoding="utf-8")
+    assert exports["pages_jsonl"].read_text(encoding="utf-8").count("\\n") == 1
 
 
 def test_url_controls_normalize_scope_and_reject_unsafe_inputs() -> None:

@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from app.export_models import validate_issues, validate_pages
 from app.urltools import safe_filename
 
 
@@ -25,10 +26,12 @@ def _base_name(crawl: dict[str, Any]) -> str:
 def write_csv_exports(data_dir: Path, crawl: dict[str, Any], pages: list[dict[str, Any]], issues: list[dict[str, Any]]) -> tuple[Path, Path]:
     root = _export_dir(data_dir)
     base = _base_name(crawl)
+    pages = validate_pages(pages)
+    issues = validate_issues(issues)
     pages_path = root / f"{base}-pages.csv"
     issues_path = root / f"{base}-issues.csv"
     with pages_path.open("w", encoding="utf-8", newline="") as handle:
-        fields = ["url", "final_url", "status_code", "content_type", "title", "description", "h1", "canonical", "meta_robots", "x_robots", "robots_allowed", "internal_inlinks", "rendered_word_count", "image_count", "images_missing_alt", "structured_data_types", "fetch_error", "render_error"]
+        fields = ["url", "final_url", "status_code", "content_type", "title", "description", "h1", "canonical", "meta_robots", "x_robots", "robots_allowed", "internal_inlinks", "rendered_word_count", "image_count", "images_missing_alt", "structured_data_types", "extracted_text", "extraction_error", "extracted_fields", "extraction_notes", "fetch_error", "render_error"]
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for page in pages:
@@ -37,7 +40,7 @@ def write_csv_exports(data_dir: Path, crawl: dict[str, Any], pages: list[dict[st
                 "h1": " | ".join(page["headings"].get("h1", [])), "canonical": page["canonical"], "meta_robots": page["meta_robots"], "x_robots": page["x_robots"], "robots_allowed": page["robots_allowed"],
                 "internal_inlinks": page["internal_inlinks"], "rendered_word_count": len(page["rendered_text"].split()), "image_count": len(page["images"]),
                 "images_missing_alt": sum(not image.get("has_alt") or not image.get("alt", "").strip() for image in page["images"]),
-                "structured_data_types": " | ".join(sorted({item for block in page["structured_data"] for item in block.get("types", [])})), "fetch_error": page["fetch_error"], "render_error": page["render_error"],
+                "structured_data_types": " | ".join(sorted({item for block in page["structured_data"] for item in block.get("types", [])})), "extracted_text": page["extracted_text"], "extraction_error": page["extraction_error"], "extracted_fields": json.dumps(page["extracted_fields"], sort_keys=True), "extraction_notes": " | ".join(page["extraction_notes"]), "fetch_error": page["fetch_error"], "render_error": page["render_error"],
             })
     with issues_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
@@ -48,6 +51,27 @@ def write_csv_exports(data_dir: Path, crawl: dict[str, Any], pages: list[dict[st
         writer.writeheader()
         writer.writerows(issues)
     return pages_path, issues_path
+
+
+def write_json_exports(data_dir: Path, crawl: dict[str, Any], pages: list[dict[str, Any]], issues: list[dict[str, Any]]) -> dict[str, Path]:
+    """Write complete validated JSON and JSONL records for machine pipelines."""
+    root = _export_dir(data_dir)
+    base = _base_name(crawl)
+    validated_pages = validate_pages(pages)
+    validated_issues = validate_issues(issues)
+    outputs = {
+        "crawl": root / f"{base}-crawl.json",
+        "pages": root / f"{base}-pages.json",
+        "issues": root / f"{base}-issues.json",
+        "pages_jsonl": root / f"{base}-pages.jsonl",
+        "issues_jsonl": root / f"{base}-issues.jsonl",
+    }
+    outputs["crawl"].write_text(json.dumps({"crawl": crawl, "pages": validated_pages, "issues": validated_issues}, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    outputs["pages"].write_text(json.dumps(validated_pages, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    outputs["issues"].write_text(json.dumps(validated_issues, indent=2, sort_keys=True, default=str), encoding="utf-8")
+    outputs["pages_jsonl"].write_text("".join(json.dumps(page, sort_keys=True, default=str) + "\\n" for page in validated_pages), encoding="utf-8")
+    outputs["issues_jsonl"].write_text("".join(json.dumps(issue, sort_keys=True, default=str) + "\\n" for issue in validated_issues), encoding="utf-8")
+    return outputs
 
 
 def write_html_report(data_dir: Path, crawl: dict[str, Any], pages: list[dict[str, Any]], issues: list[dict[str, Any]]) -> Path:

@@ -1,0 +1,35 @@
+{
+  "name": "catalog-and-contact",
+  "fields": [
+    {
+      "name": "product_names",
+      "selector": "article.product h2",
+      "selector_type": "css",
+      "source": "either",
+      "max_values": 50
+    },
+    {
+      "name": "rendered_price_labels",
+      "selector": "[data-price]",
+      "selector_type": "css",
+      "source": "dynamic",
+      "attribute": "data-price",
+      "max_values": 50
+    },
+    {
+      "name": "contact_email",
+      "selector": "[href^=\"mailto:\"]",
+      "selector_type": "css",
+      "source": "static",
+      "attribute": "href",
+      "max_values": 10
+    },
+    {
+      "name": "canonical_product_name",
+      "selector": "name",
+      "selector_type": "jsonld",
+      "source": "either",
+      "max_values": 10
+    }
+  ]
+}

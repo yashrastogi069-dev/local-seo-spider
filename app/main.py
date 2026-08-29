@@ -24,7 +24,7 @@ from app.agentic import agentic_retrieve
 from app.answering import LocalAnswerer
 from app.database import Database, now
 from app.embeddings import build_embedding_provider
-from app.exports import write_csv_exports, write_html_report
+from app.exports import write_csv_exports, write_html_report, write_json_exports
 from app.types import CrawlRequest
 from app.urltools import UrlValidationError, is_same_host, normalize_url, visible_url
 from app.workflows import WorkflowDefinition, WorkflowEngine, trigger_matches, workflow_json
@@ -89,12 +89,26 @@ def _home_response(request: Request, error: str | None = None, status_code: int 
     )
 
 
-def _parse_request(start_url: str, mode: str, url_list: str, max_urls: str, delay_seconds: str, respect_nofollow: str | None, authorization_acknowledgment: str | None) -> CrawlRequest:
+def _parse_request(start_url: str, mode: str, url_list: str, max_urls: str, delay_seconds: str, respect_nofollow: str | None, authorization_acknowledgment: str | None, executor_mode: str = "serial", extraction_profile_path: str = "") -> CrawlRequest:
     if authorization_acknowledgment != "yes":
         raise ValueError("Confirm that you own this site or have explicit permission to assess it before starting a crawl.")
     normalized_start = normalize_url(start_url)
     if mode not in {"site", "list"}:
         raise ValueError("Choose a valid crawl mode.")
+    executor_mode = executor_mode.strip().lower() or settings.crawl_executor_mode
+    if executor_mode not in {"serial", "thread", "async", "process"}:
+        raise ValueError("Executor mode must be serial, thread, async, or process.")
+    profile_value = extraction_profile_path.strip()
+    profile_path = ""
+    if profile_value:
+        candidate = Path(profile_value)
+        if not candidate.is_absolute():
+            candidate = (ROOT / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+        if not candidate.is_file() or candidate.stat().st_size > 1_000_000:
+            raise ValueError("Extraction profile must be an existing local JSON file no larger than 1 MB.")
+        profile_path = str(candidate)
     try:
         parsed_max = int(max_urls)
     except ValueError as exc:
@@ -120,7 +134,7 @@ def _parse_request(start_url: str, mode: str, url_list: str, max_urls: str, dela
         if not parsed_urls:
             raise ValueError("Paste at least one URL for exact URL list mode.")
         parsed_max = min(parsed_max, len(parsed_urls))
-    return CrawlRequest(normalized_start, mode, parsed_urls, parsed_max, parsed_delay, respect_nofollow == "yes", True)
+    return CrawlRequest(normalized_start, mode, parsed_urls, parsed_max, parsed_delay, respect_nofollow == "yes", True, executor_mode, profile_path)
 
 
 def _run_claimed_crawl(crawl_id: str, crawl_request: CrawlRequest) -> None:
@@ -195,9 +209,11 @@ def create_crawl(
     delay_seconds: Annotated[str, Form()] = str(settings.default_delay_seconds),
     respect_nofollow: Annotated[str | None, Form()] = None,
     authorization_acknowledgment: Annotated[str | None, Form()] = None,
+    executor_mode: Annotated[str, Form()] = "serial",
+    extraction_profile_path: Annotated[str, Form()] = "",
 ) -> Response:
     try:
-        crawl_request = _parse_request(start_url, mode, url_list, max_urls, delay_seconds, respect_nofollow, authorization_acknowledgment)
+        crawl_request = _parse_request(start_url, mode, url_list, max_urls, delay_seconds, respect_nofollow, authorization_acknowledgment, executor_mode, extraction_profile_path)
     except (ValueError, UrlValidationError) as exc:
         if request.headers.get("HX-Request") != "true":
             return _home_response(request, error=str(exc), status_code=422)
@@ -371,9 +387,13 @@ def export(crawl_id: str, kind: str) -> FileResponse:
         path = issue_path
     elif kind == "report-html":
         path = write_html_report(settings.data_dir, crawl, pages, issues)
+    elif kind in {"crawl-json", "pages-json", "issues-json", "pages-jsonl", "issues-jsonl"}:
+        paths = write_json_exports(settings.data_dir, crawl, pages, issues)
+        path = paths[{"crawl-json": "crawl", "pages-json": "pages", "issues-json": "issues", "pages-jsonl": "pages_jsonl", "issues-jsonl": "issues_jsonl"}[kind]]
     else:
         raise HTTPException(404, "Unknown export type.")
-    return FileResponse(path, filename=path.name, media_type="text/csv" if path.suffix == ".csv" else "text/html")
+    media_type = {".csv": "text/csv", ".html": "text/html", ".json": "application/json", ".jsonl": "application/x-ndjson"}.get(path.suffix, "application/octet-stream")
+    return FileResponse(path, filename=path.name, media_type=media_type)
 
 
 @app.get("/api/workflows")

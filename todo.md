@@ -64,3 +64,11 @@
 - [x] Add workflow activation, trigger filtering, and run-history recovery states.
 - [x] Expose bounded workflow run history through a read-only local API for recovery and inspection.
 - [x] Run full adversarial tests, document exact local usage, and synchronize every milestone to private GitHub (`322f20962e723527094bf866aa190376a4f46794`).
+- [x] Audit the current crawler against target-field extraction, static/dynamic acquisition, Pydantic validation, storage formats, and concurrency modes.
+- [x] Add configurable target-field extraction profiles with provenance and bounded static/dynamic behavior.
+- [x] Add Pydantic-validated extraction and export models plus JSON/JSONL/CSV/SQLite storage paths.
+- [x] Add selectable coroutine, threaded, and multiprocessing execution modes with bounded resource controls.
+- [x] Add local UI/configuration controls and document when each concurrency mode is appropriate.
+- [ ] Add adversarial and performance regression coverage, update documentation, and synchronize the advanced scraping milestone to private GitHub.
+- [x] Document serial, thread, async, and process executor trade-offs and safe use cases in README/docs.
+- [x] Test that FastAPI accepts and persists per-crawl executor and extraction-profile fields.

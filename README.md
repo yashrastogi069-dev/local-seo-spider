@@ -42,6 +42,12 @@ Each crawl stores raw HTTP and rendered-browser evidence separately where applic
 
 The crawl engine uses a direct HTTP request for headers and source HTML, then a bounded Playwright page visit for rendered DOM inspection. It does **not** submit forms, sign in, work around access controls, open pop-ups, collect credentials, or mutate target-site content. Playwright failure is a per-page, recoverable inspection warning; raw HTML findings remain available.
 
+### Executor modes
+
+The default `serial` executor is the reference mode. It preserves the full Playwright rendered-DOM path, keeps request ordering easiest to inspect, and is the right choice for JavaScript-heavy or smaller audits. `thread` uses a bounded thread pool for I/O-heavy static acquisition and is useful when a permitted site serves many independent server-rendered pages. `async` uses bounded HTTP coroutines for high-latency static requests and lower per-task overhead. `process` uses bounded worker processes for CPU-heavy static parsing on multi-core machines, but its network fetches and serialized page records add overhead. Thread, async, and process modes intentionally skip Playwright rendering; they are not substitutes for the serial mode when client-side content is the target. All modes retain the same host boundary, robots check, request delay, retry limits, response-size cap, and URL cap. Set `SPIDER_CRAWL_EXECUTOR_MODE` globally or choose a mode per crawl in the local form. Start with `serial`, then use `thread` or `async` for static workloads; use `process` only after measuring a CPU-bound workload.
+
+Target-field extraction is configured with a local JSON profile such as [`extraction-profile.example.json`](extraction-profile.example.json). CSS, XPath, regex, attribute, and JSON-LD selectors can choose `static`, `dynamic`, or `either` sources. Each result stores its values, source, selector, and explicit `found`, `missing`, or `error` status so a failed target does not look like a successful empty value.
+
 ## Technical and content audit rules
 
 The first release creates clear, evidence-backed findings for broken internal links, 4xx and 5xx responses, redirect chains, missing and duplicate titles, missing and duplicate descriptions, missing H1s, duplicate rendered content, image alternate-text gaps, invalid JSON-LD, orphan candidates, and canonical or robots indexability conflicts. Every row contains its severity, exact affected URL, collected evidence, and concrete remediation note.

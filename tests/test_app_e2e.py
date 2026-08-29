@@ -97,8 +97,12 @@ def test_authorized_crawl_renders_audit_and_exports(tmp_path, monkeypatch) -> No
 
         csv_export = client.get(f"/crawls/{crawl_id}/export/issues-csv")
         report_export = client.get(f"/crawls/{crawl_id}/export/report-html")
+        json_export = client.get(f"/crawls/{crawl_id}/export/pages-json")
+        jsonl_export = client.get(f"/crawls/{crawl_id}/export/pages-jsonl")
         assert csv_export.status_code == 200 and "Missing page title" in csv_export.text
         assert report_export.status_code == 200 and "SEO inspection ledger" in report_export.text
+        assert json_export.status_code == 200 and '"url": "https://owned.example/"' in json_export.text
+        assert jsonl_export.status_code == 200 and '"url": "https://owned.example/"' in jsonl_export.text
 
         fallback = client.post("/crawls", data={
             "start_url": "https://owned.example/", "mode": "site", "url_list": "", "max_urls": "5", "delay_seconds": "0.1",
@@ -106,6 +110,29 @@ def test_authorized_crawl_renders_audit_and_exports(tmp_path, monkeypatch) -> No
         }, headers={"HX-Request": "false"}, follow_redirects=False)
         assert fallback.status_code == 303
         assert fallback.headers["location"].startswith("/crawls/")
+
+
+def test_form_persists_executor_and_extraction_profile_settings(tmp_path, monkeypatch) -> None:
+    local_settings = replace(main.settings, data_dir=tmp_path / "data", render_enabled=False)
+    monkeypatch.setattr(main, "settings", local_settings)
+    monkeypatch.setattr(main, "database", Database(local_settings.database_path))
+    monkeypatch.setattr(main, "_start_worker", lambda: None)
+    profile = tmp_path / "profile.json"
+    profile.write_text('{"name":"fixture","fields":[{"name":"sku","selector":"[data-sku]"}]}', encoding="utf-8")
+
+    with TestClient(main.app) as client:
+        created = client.post("/crawls", data={
+            "start_url": "https://owned.example/", "mode": "site", "max_urls": "2", "delay_seconds": "0.1",
+            "respect_nofollow": "yes", "authorization_acknowledgment": "yes", "executor_mode": "thread",
+            "extraction_profile_path": str(profile),
+        }, headers={"HX-Request": "true"})
+        assert created.status_code == 200
+        crawl_id = main.database.list_crawls()[0]["id"]
+        saved = main.database.get_crawl_request(crawl_id)
+
+    assert saved is not None
+    assert saved.executor_mode == "thread"
+    assert saved.extraction_profile_path == str(profile.resolve())
 
 
 def test_completed_crawl_with_no_html_shows_dedicated_empty_knowledge_state(tmp_path, monkeypatch) -> None:

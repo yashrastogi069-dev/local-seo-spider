@@ -1,7 +1,7 @@
 <!-- Field Manual: explicit authority and scope are first-class interaction states. -->
 <form method="post" action="/crawls" hx-post="/crawls" hx-target="#crawl-form-panel" hx-swap="innerHTML" hx-indicator="#form-loading" novalidate>
   <div class="form-head"><p class="eyebrow">CRAWL REQUEST</p><span class="stamp">REQUIRED FIELDS</span></div>
-  <ol class="inspection-stages" aria-label="Inspection stages"><li class="active"><span>01</span> Target</li><li><span>02</span> Boundary</li><li><span>03</span> Permission</li></ol>
+  <ol class="inspection-stages" aria-label="Inspection stages"><li class="active"><span>01</span> Target</li><li><span>02</span> Extract &amp; run</li><li><span>03</span> Boundary</li><li><span>04</span> Permission</li></ol>
   {% if error %}<div class="form-error" role="alert"><strong>Review the request.</strong><span>{{ error }}</span></div>{% endif %}
   <section class="field-group" aria-labelledby="target-group-title"><div class="group-label"><span>01</span><strong id="target-group-title">Target record</strong><small>What will be inspected</small></div><div class="field wide">
       <label for="start_url">Starting URL</label>
@@ -18,7 +18,13 @@
       <textarea id="url_list" name="url_list" rows="4" placeholder="https://www.example.com/page-a&#10;https://www.example.com/page-b"></textarea>
     </div>
   </section>
-  <section class="field-group boundary-group" aria-labelledby="boundary-group-title"><div class="group-label"><span>02</span><strong id="boundary-group-title">Boundary record</strong><small>How the crawl is contained</small></div>
+  <section class="field-group capability-group" aria-labelledby="capability-group-title"><div class="group-label"><span>02</span><strong id="capability-group-title">Extraction &amp; execution</strong><small>What is collected and how it runs</small></div>
+    <div class="form-columns">
+      <div class="field"><label for="executor_mode">Executor mode</label><select id="executor_mode" name="executor_mode"><option value="serial">Serial + Playwright (safest)</option><option value="thread">Threaded static crawl</option><option value="async">Coroutine static crawl</option><option value="process">Multiprocess static crawl</option></select><p class="field-hint">Thread/async/process modes skip browser rendering and are best for high-volume static pages.</p></div>
+      <div class="field"><label for="extraction_profile_path">Target-field profile <span class="optional">(optional)</span></label><input id="extraction_profile_path" name="extraction_profile_path" type="text" placeholder="extraction-profile.example.json" autocomplete="off" /><p class="field-hint">Local JSON profile with CSS, XPath, regex, attribute, or JSON-LD targets.</p></div>
+    </div>
+  </section>
+  <section class="field-group boundary-group" aria-labelledby="boundary-group-title"><div class="group-label"><span>03</span><strong id="boundary-group-title">Boundary record</strong><small>How the crawl is contained</small></div>
   <div class="form-columns">
     <div class="field"><label for="max_urls">URL cap</label><input id="max_urls" name="max_urls" type="number" min="1" max="{{ defaults.max_url_cap }}" value="{{ defaults.url_cap }}" required /><p class="field-hint">Maximum {{ defaults.max_url_cap }} URLs.</p></div>
     <div class="field"><label for="delay_seconds">Delay per request</label><input id="delay_seconds" name="delay_seconds" type="number" min="0.1" max="60" step="0.1" value="{{ defaults.delay }}" required /><p class="field-hint">Seconds; minimum 0.1.</p></div>

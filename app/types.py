@@ -47,6 +47,8 @@ class PageRecord:
     content_hash: str = ""
     extracted_text: str = ""
     extraction_error: str = ""
+    extracted_fields: dict[str, Any] = field(default_factory=dict)
+    extraction_notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -75,6 +77,8 @@ class CrawlRequest:
     delay_seconds: float = 0.35
     respect_nofollow: bool = True
     acknowledgment: bool = False
+    executor_mode: str = "serial"
+    extraction_profile_path: str = ""
 
     def public_settings(self) -> dict[str, Any]:
         return {
@@ -83,6 +87,8 @@ class CrawlRequest:
             "delay_seconds": self.delay_seconds,
             "respect_nofollow": self.respect_nofollow,
             "url_list_count": len(self.url_list),
+            "executor_mode": self.executor_mode,
+            "extraction_profile": bool(self.extraction_profile_path),
         }
 
     def storage_payload(self) -> dict[str, Any]:
@@ -99,4 +105,6 @@ class CrawlRequest:
             delay_seconds=float(payload["delay_seconds"]),
             respect_nofollow=bool(payload["respect_nofollow"]),
             acknowledgment=bool(payload["acknowledgment"]),
+            executor_mode=str(payload.get("executor_mode", "serial")),
+            extraction_profile_path=str(payload.get("extraction_profile_path", "")),
         )
