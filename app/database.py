@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
 
+from app.knowledge import KnowledgeChunk
 from app.types import CrawlRequest, IssueRecord, LinkRecord, PageRecord
 
 
@@ -65,6 +67,16 @@ class Database:
                   evidence TEXT NOT NULL, remediation TEXT NOT NULL, fingerprint TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_issues_crawl_severity ON issues(crawl_id, severity);
+                CREATE TABLE IF NOT EXISTS knowledge_chunks (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT, page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+                  crawl_id TEXT NOT NULL REFERENCES crawls(id) ON DELETE CASCADE, url TEXT NOT NULL, title TEXT NOT NULL,
+                  heading_path TEXT NOT NULL, content TEXT NOT NULL, chunk_index INTEGER NOT NULL,
+                  UNIQUE(crawl_id, page_id, chunk_index)
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowledge_crawl ON knowledge_chunks(crawl_id, page_id);
+                CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+                  chunk_id UNINDEXED, crawl_id UNINDEXED, url, title, heading_path, content
+                );
                 """
             )
             self._ensure_crawl_columns(conn)
@@ -232,6 +244,56 @@ class Database:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 [(crawl_id, issue.rule_key, issue.severity, issue.title, issue.url, issue.evidence, issue.remediation, issue.fingerprint) for issue in issues],
             )
+
+    def replace_knowledge_chunks(self, crawl_id: str, chunks: Iterable[KnowledgeChunk]) -> None:
+        """Replace one crawl's local knowledge index and its FTS rows atomically."""
+        materialized = list(chunks)
+        with self.connect() as conn:
+            conn.execute("DELETE FROM knowledge_fts WHERE crawl_id = ?", (crawl_id,))
+            conn.execute("DELETE FROM knowledge_chunks WHERE crawl_id = ?", (crawl_id,))
+            for chunk in materialized:
+                cursor = conn.execute(
+                    """INSERT INTO knowledge_chunks (page_id, crawl_id, url, title, heading_path, content, chunk_index)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    chunk.as_row(),
+                )
+                conn.execute(
+                    """INSERT INTO knowledge_fts (chunk_id, crawl_id, url, title, heading_path, content)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (cursor.lastrowid, crawl_id, chunk.url, chunk.title, chunk.heading_path, chunk.content),
+                )
+
+    def get_knowledge_chunks(self, crawl_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT id, page_id, url, title, heading_path, content, chunk_index FROM knowledge_chunks WHERE crawl_id = ? ORDER BY url, chunk_index",
+                (crawl_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def knowledge_count(self, crawl_id: str) -> int:
+        with self.connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS count FROM knowledge_chunks WHERE crawl_id = ?", (crawl_id,)).fetchone()
+        return int(row["count"]) if row else 0
+
+    def search_knowledge(self, crawl_id: str, query: str, limit: int = 6) -> list[dict[str, Any]]:
+        """Search only one crawl and return ranked passages with verifiable provenance."""
+        stop_words = {"what", "which", "where", "when", "does", "this", "that", "the", "and", "for", "from", "with", "about", "does", "are", "is", "how", "can", "tell", "please"}
+        terms = [term for term in re.findall(r"[\w][\w'-]{1,}", query.lower()) if term not in stop_words]
+        if not terms:
+            return []
+        match_query = " OR ".join(f'"{term.replace(chr(34), "")}"' for term in terms[:12])
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT k.id, k.page_id, k.url, k.title, k.heading_path, k.content,
+                          bm25(knowledge_fts) AS rank
+                   FROM knowledge_fts f
+                   JOIN knowledge_chunks k ON k.id = f.chunk_id
+                   WHERE f.crawl_id = ? AND knowledge_fts MATCH ?
+                   ORDER BY rank LIMIT ?""",
+                (crawl_id, match_query, max(1, min(limit, 20))),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_pages(self, crawl_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:

@@ -49,6 +49,24 @@ The **Content Inventory** retains marketing-useful signals—heading coverage, d
 
 Completed crawls of the same normalized start URL can also be compared locally. The comparison identifies added and absent URLs, observable changes to status, metadata, canonical, robots, and rendered-text hash, plus issue fingerprints that are new or no longer present. It does not infer cause, rankings, traffic, or business impact from those changes.
 
+## Local website knowledge and grounded questions
+
+Completed crawls now build a local SQLite FTS5 knowledge index from readable HTML blocks. Each indexed passage retains its crawl, page, URL, title, and heading path, so the question surface can show where evidence came from. Open a completed crawl and use **Ask the local crawl** to search the indexed website content. The answer mode is deliberately citation-first: it returns matching passages and abstains when the local crawl does not contain enough evidence. It does not invent facts, infer private content, or treat search ranking as proof. The **Rebuild local index** action can recover an index for an older completed crawl after parser improvements or a partial failure, and completed crawls can compare added and removed evidence chunks.
+
+A read-only JSON endpoint is also available for local workflow experiments:
+
+```text
+GET /api/crawls/<crawl-id>/ask?q=your+question
+```
+
+The endpoint is scoped to one completed crawl and returns the question, grounded status, answer text, and citations. It is intentionally read-only; it cannot start crawls, submit forms to target websites, change production content, or access another crawl's evidence.
+
+## Future automation boundary
+
+The knowledge layer is designed so an automation tool such as n8n can later call the read-only question endpoint or receive explicit crawl-completed events. The current `/api/crawls/<crawl-id>/ask` endpoint is read-only and local. n8n supports webhook triggers and API-style responses, but any future integration must add explicit authentication, request validation, idempotency, local-network exposure controls, and operator approval. The default application remains local-only and does not connect to n8n or send crawl data anywhere.
+
+A natural-language generator can be added later as an opt-in layer. To preserve the local-only promise, the preferred design is a model running on the same computer; any hosted model would require a separate, explicit privacy decision because website passages would leave the machine. Retrieval and citations remain the source of truth either way.
+
 ## Architecture
 
 ```text
@@ -63,13 +81,16 @@ FastAPI request validation ──► SQLite job ledger (local `data/`)
                                       ▼
                             bounded same-host crawl and persisted evidence
                                       │
-                 ┌────────────────────┴────────────────────┐
-                 ▼                                         ▼
+                 ┌────────────────────┴──────────────────────────┐
+                 ▼                                               ▼
     robots.txt + request delay, HTTP source + headers,    pages, links, issues,
     Playwright rendered inspection                        CSV exports, HTML report
+                 │
+                 ▼
+        SQLite FTS5 knowledge chunks ──► cited local questions / read-only API
 ```
 
-`app/crawler.py` owns collection and is deliberately limited to a single host and local crawl settings. `app/parser.py` converts source or rendered HTML into structured records. `app/analyzer.py` is a deterministic transformation from persisted evidence to issue rows. `app/database.py` is the SQLite persistence boundary and durable job ledger; it supports safe startup recovery, bounded retry timing, circuit-breaker pauses, and explicit operator resume. `app/exports.py` writes reproducible local exports. `app/templates/` and `app/static/` provide the Field Manual HTMX interface.
+`app/crawler.py` owns collection and is deliberately limited to a single host and local crawl settings. `app/parser.py` converts source or rendered HTML into structured records. `app/knowledge.py` extracts citation-preserving readable chunks. `app/qa.py` answers from retrieved local evidence and abstains when support is insufficient. `app/analyzer.py` is a deterministic transformation from persisted evidence to issue rows. `app/database.py` is the SQLite persistence boundary and durable job ledger; it supports safe startup recovery, bounded retry timing, circuit-breaker pauses, explicit operator resume, and FTS5 knowledge retrieval. `app/exports.py` writes reproducible local exports. `app/templates/` and `app/static/` provide the Field Manual HTMX interface.
 
 ### Local worker and recovery behavior
 
@@ -101,11 +122,11 @@ Run the focused test suite after creating the local environment:
 .venv/bin/python -m pytest
 ```
 
-The tests cover deterministic technical-issue evidence, URL validation and safe filename behavior, robots and redirect handling, recoverable rendering fallback, CSV/HTML export safety, contrast regression, FastAPI security headers, permission blocking, HTMX and non-HTMX form paths, crawl comparison, and durable SQLite job claim/retry/pause/resume/startup-recovery behavior.
+The tests cover deterministic technical-issue evidence, URL validation and safe filename behavior, robots and redirect handling, recoverable rendering fallback, CSV/HTML export safety, contrast regression, FastAPI security headers, permission blocking, HTMX and non-HTMX form paths, crawl comparison, durable SQLite job claim/retry/pause/resume/startup-recovery behavior, knowledge chunk provenance, crawl-scoped FTS5 retrieval, citation-first answers, abstention, and the completed-crawl question endpoint.
 
 ## References
 
-The implementation follows documented crawler and search signals: the reference crawler describes local site-audit checks for broken links, redirects, metadata, duplicate content, robots directives, JavaScript rendering, and crawl comparison.[1] Google documents `robots.txt` as a crawler-access mechanism rather than indexing control, and distinguishes it from `noindex`.[2] It also documents canonical signals,[3] link qualification values such as `nofollow`,[4] quality meta-description principles,[5] and structured-data expectations.[6] Playwright provides the browser page abstraction used for bounded rendered DOM inspection.[7]
+The implementation follows documented crawler and search signals: the reference crawler describes local site-audit checks for broken links, redirects, metadata, duplicate content, robots directives, JavaScript rendering, and crawl comparison.[1] Google documents `robots.txt` as a crawler-access mechanism rather than indexing control, and distinguishes it from `noindex`.[2] It also documents canonical signals,[3] link qualification values such as `nofollow`,[4] quality meta-description principles,[5] and structured-data expectations.[6] Playwright provides the browser page abstraction used for bounded rendered DOM inspection.[7] SQLite FTS5 supplies the local full-text retrieval index used for knowledge chunks, supporting MATCH queries, phrase/prefix/Boolean search, snippets, highlighting, and relevance ranking.[8] The original RAG formulation combines a generator with explicit retrieved non-parametric memory, which informs this project’s citation-first and abstention behavior.[9] n8n’s Webhook node supports a future narrow HTTP workflow boundary with separate test/production endpoints and configurable responses.[10]
 
 [1]: https://www.screamingfrog.co.uk/seo-spider/ "Screaming Frog SEO Spider Website Crawler"
 [2]: https://developers.google.com/search/docs/crawling-indexing/robots/intro "Google Search Central: Robots.txt Introduction"
@@ -114,3 +135,6 @@ The implementation follows documented crawler and search signals: the reference 
 [5]: https://developers.google.com/search/docs/appearance/snippet "Google Search Central: Snippets and Meta Descriptions"
 [6]: https://developers.google.com/search/docs/appearance/structured-data/intro-structured-data "Google Search Central: Structured Data Introduction"
 [7]: https://playwright.dev/python/docs/pages "Playwright Python: Pages"
+[8]: https://www.sqlite.org/fts5.html "SQLite FTS5 Extension"
+[9]: https://proceedings.neurips.cc/paper_files/paper/2020/hash/6b493230-Abstract.html "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks"
+[10]: https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.webhook/ "n8n Webhook node"

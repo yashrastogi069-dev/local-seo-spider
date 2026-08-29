@@ -35,3 +35,18 @@
 - [x] Add a focused validation step or CI check for future changes.
 - [x] Decide whether a `.bat` alias adds value beyond the validated `run-local.cmd`, and document the simplest Windows launch path.
 - [x] Fix Windows launcher output to show `http://127.0.0.1:<port>/` instead of the bind address `http://0.0.0.0:<port>/`, and add regression coverage.
+- [x] Define the local-first knowledge-crawler data model and RAG grounding rules.
+- [x] Extract crawl content into citation-preserving, searchable knowledge chunks.
+- [x] Add SQLite FTS5 retrieval with URL, heading, crawl, and evidence provenance.
+- [x] Add a question-answering interface that abstains when evidence is insufficient.
+- [x] Add crawl-to-knowledge indexing, refresh, comparison, and recoverable error states.
+- [x] Document and test a narrow automation boundary for future n8n-style workflows without unsafe site mutations.
+- [x] Run end-to-end retrieval and grounding tests, update documentation, and synchronize the feature to private GitHub.
+- [x] Add an explicit reindex/refresh action for existing completed crawls with success and error states.
+- [x] Implement knowledge comparison between completed crawls, including changed evidence chunks.
+- [x] Add recoverable knowledge-index loading, empty, and failure states with tests.
+- [x] Bind the Unix launcher to loopback as well so the local knowledge API is not exposed to the LAN by default.
+- [x] Push the completed knowledge and RAG changes to private GitHub and verify local and remote SHAs match.
+- [x] Add explicit loading states for question and reindex HTMX actions and test them.
+- [x] Add a dedicated empty-index state when a completed crawl has zero searchable knowledge chunks and test it.
+- [ ] Push the completed knowledge/RAG changes to private GitHub and record matching local and remote SHAs.

@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main
 from app.database import Database
-from app.types import LinkRecord, PageRecord
+from app.types import CrawlRequest, LinkRecord, PageRecord
 
 
 def test_authorized_crawl_renders_audit_and_exports(tmp_path, monkeypatch) -> None:
@@ -62,6 +62,37 @@ def test_authorized_crawl_renders_audit_and_exports(tmp_path, monkeypatch) -> No
         assert ledger.status_code == 200
         assert "Missing page title" in ledger.text
         assert "Self-contained HTML report" in ledger.text
+        assert "1 evidence chunks indexed" in ledger.text
+        assert "Searching local evidence" in ledger.text
+        assert "Rebuilding" in ledger.text
+
+        answer = client.post(f"/crawls/{crawl_id}/ask", data={"question": "What is the useful local inspection text?"})
+        assert answer.status_code == 200
+        assert "EVIDENCE-BACKED RESULT" in answer.text
+        assert "Useful local inspection text." in answer.text
+        assert "https://owned.example/" in answer.text
+
+        unanswered = client.post(f"/crawls/{crawl_id}/ask", data={"question": "What is the moon made of?"})
+        assert unanswered.status_code == 200
+        assert "INSUFFICIENT EVIDENCE" in unanswered.text
+
+        api_answer = client.get(f"/api/crawls/{crawl_id}/ask", params={"q": "useful local inspection"})
+        assert api_answer.status_code == 200
+        assert api_answer.json()["grounded"] is True
+        assert api_answer.json()["citations"][0]["url"] == "https://owned.example/"
+
+        reindexed = client.post(f"/crawls/{crawl_id}/knowledge/reindex", headers={"HX-Request": "true"})
+        assert reindexed.status_code == 200
+        assert "LOCAL INDEX READY" in reindexed.text
+
+        def fail_index(*args, **kwargs):
+            raise RuntimeError("fixture index failure")
+
+        monkeypatch.setattr(main, "extract_pages_knowledge", fail_index)
+        failed_reindex = client.post(f"/crawls/{crawl_id}/knowledge/reindex", headers={"HX-Request": "true"})
+        assert failed_reindex.status_code == 500
+        assert "REBUILD FAILED" in failed_reindex.text
+        assert "fixture index failure" in failed_reindex.text
 
         csv_export = client.get(f"/crawls/{crawl_id}/export/issues-csv")
         report_export = client.get(f"/crawls/{crawl_id}/export/report-html")
@@ -74,6 +105,22 @@ def test_authorized_crawl_renders_audit_and_exports(tmp_path, monkeypatch) -> No
         }, headers={"HX-Request": "false"}, follow_redirects=False)
         assert fallback.status_code == 303
         assert fallback.headers["location"].startswith("/crawls/")
+
+
+def test_completed_crawl_with_no_html_shows_dedicated_empty_knowledge_state(tmp_path, monkeypatch) -> None:
+    local_settings = replace(main.settings, data_dir=tmp_path / "data", render_enabled=False)
+    monkeypatch.setattr(main, "settings", local_settings)
+    monkeypatch.setattr(main, "database", Database(local_settings.database_path))
+    monkeypatch.setattr(main, "_start_worker", lambda: None)
+
+    with TestClient(main.app) as client:
+        crawl_id = main.database.create_crawl(CrawlRequest("https://empty.example/", "site", max_urls=1, acknowledgment=True))
+        main.database.update_crawl(crawl_id, status="completed", completed_at="2026-08-29T00:00:00+00:00", robots_status="loaded")
+        detail = client.get(f"/crawls/{crawl_id}")
+
+    assert detail.status_code == 200
+    assert "0 evidence chunks indexed" in detail.text
+    assert "NO SEARCHABLE CONTENT" in detail.text
 
 
 def test_operator_can_pause_and_resume_a_queued_local_job(tmp_path, monkeypatch) -> None:

@@ -1,0 +1,15 @@
+<div class="knowledge-answer {% if not result.grounded %}knowledge-answer-empty{% endif %}" role="status">
+  <div class="answer-label">{% if result.grounded %}EVIDENCE-BACKED RESULT{% else %}INSUFFICIENT EVIDENCE{% endif %}</div>
+  <h3>{{ result.question or 'Website question' }}</h3>
+  <p class="answer-copy">{{ result.answer }}</p>
+  {% if result.citations %}
+  <div class="citation-list" aria-label="Answer citations">
+    {% for citation in result.citations %}
+    <a class="citation" href="{{ citation.url }}" target="_blank" rel="noreferrer">
+      <strong>{{ citation.title or citation.url }}</strong>
+      <span>{{ citation.heading_path or 'Page content' }} · {{ citation.url }}</span>
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>

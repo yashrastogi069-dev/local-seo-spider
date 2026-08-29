@@ -16,6 +16,8 @@ import uvicorn
 
 from app.analyzer import analyze_pages
 from app.comparison import compare_crawls
+from app.knowledge import compare_knowledge, extract_pages_knowledge
+from app.qa import answer_question
 from app.config import Settings
 from app.crawler import CrawlEngine
 from app.database import Database, now
@@ -126,6 +128,8 @@ def _run_claimed_crawl(crawl_id: str, crawl_request: CrawlRequest) -> None:
         pages, links, robots_status = CrawlEngine(settings).run(crawl_request, progress)
         issues = analyze_pages(pages, links, crawl_request.start_url)
         database.replace_pages_and_links(crawl_id, pages, links)
+        stored_pages = database.get_pages(crawl_id)
+        database.replace_knowledge_chunks(crawl_id, extract_pages_knowledge(stored_pages, crawl_id))
         database.replace_issues(crawl_id, issues)
         database.update_crawl(crawl_id, status="completed", completed_at=now(), robots_status=robots_status, pages_crawled=len(pages), issues_found=len(issues), pause_reason="")
     except Exception as exc:
@@ -235,7 +239,7 @@ def crawl_detail(request: Request, crawl_id: str) -> HTMLResponse:
         entry for entry in database.list_crawls()
         if entry["status"] == "completed" and entry["id"] != crawl_id and entry["start_url"] == crawl["start_url"]
     ]
-    return templates.TemplateResponse(request, "crawl_detail.html", _context(request, crawl=crawl, pages=pages, issues=issues, completed_crawls=completed_crawls))
+    return templates.TemplateResponse(request, "crawl_detail.html", _context(request, crawl=crawl, pages=pages, issues=issues, completed_crawls=completed_crawls, knowledge_count=database.knowledge_count(crawl_id)))
 
 
 @app.get("/crawls/{crawl_id}/compare/{baseline_id}", response_class=HTMLResponse)
@@ -246,6 +250,54 @@ def crawl_comparison(request: Request, crawl_id: str, baseline_id: str) -> HTMLR
         raise HTTPException(422, "Only crawls of the same normalized start URL can be compared.")
     comparison = compare_crawls(current_pages, current_issues, baseline_pages, baseline_issues)
     return templates.TemplateResponse(request, "crawl_comparison.html", _context(request, crawl=current, baseline=baseline, comparison=comparison))
+
+
+def _reindex_knowledge(crawl_id: str) -> int:
+    stored_pages = database.get_pages(crawl_id)
+    chunks = extract_pages_knowledge(stored_pages, crawl_id)
+    database.replace_knowledge_chunks(crawl_id, chunks)
+    return len(chunks)
+
+
+@app.post("/crawls/{crawl_id}/knowledge/reindex", response_class=HTMLResponse)
+def reindex_knowledge(request: Request, crawl_id: str) -> HTMLResponse:
+    crawl = database.get_crawl(crawl_id)
+    if not crawl or crawl["status"] != "completed":
+        raise HTTPException(404, "A completed crawl is required to rebuild knowledge.")
+    try:
+        count = _reindex_knowledge(crawl_id)
+        return templates.TemplateResponse(request, "partials/knowledge_status.html", _context(request, count=count, error=""))
+    except Exception as exc:
+        return templates.TemplateResponse(request, "partials/knowledge_status.html", _context(request, count=database.knowledge_count(crawl_id), error=f"Knowledge rebuild failed: {type(exc).__name__}: {exc}"), status_code=500)
+
+
+@app.get("/crawls/{crawl_id}/knowledge/compare/{baseline_id}", response_class=HTMLResponse)
+def knowledge_comparison(request: Request, crawl_id: str, baseline_id: str) -> HTMLResponse:
+    current = database.get_crawl(crawl_id)
+    baseline = database.get_crawl(baseline_id)
+    if not current or current["status"] != "completed" or not baseline or baseline["status"] != "completed":
+        raise HTTPException(404, "Two completed crawls are required for knowledge comparison.")
+    if current["start_url"] != baseline["start_url"]:
+        raise HTTPException(422, "Only crawls of the same normalized start URL can be compared.")
+    comparison = compare_knowledge(database.get_knowledge_chunks(crawl_id), database.get_knowledge_chunks(baseline_id))
+    return templates.TemplateResponse(request, "knowledge_comparison.html", _context(request, crawl=current, baseline=baseline, comparison=comparison))
+
+
+@app.get("/api/crawls/{crawl_id}/ask")
+def ask_crawl_api(crawl_id: str, q: str = "") -> dict[str, object]:
+    crawl = database.get_crawl(crawl_id)
+    if not crawl or crawl["status"] != "completed":
+        raise HTTPException(404, "A completed crawl is required for questions.")
+    return answer_question(crawl_id, q, database.search_knowledge)
+
+
+@app.post("/crawls/{crawl_id}/ask", response_class=HTMLResponse)
+def ask_crawl(request: Request, crawl_id: str, question: Annotated[str, Form()] = "") -> HTMLResponse:
+    crawl = database.get_crawl(crawl_id)
+    if not crawl or crawl["status"] != "completed":
+        raise HTTPException(404, "A completed crawl is required for questions.")
+    result = answer_question(crawl_id, question, database.search_knowledge)
+    return templates.TemplateResponse(request, "partials/knowledge_answer.html", _context(request, result=result, crawl=crawl))
 
 
 @app.get("/crawls/{crawl_id}/content", response_class=HTMLResponse)
