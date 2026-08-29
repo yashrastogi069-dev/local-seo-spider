@@ -63,4 +63,4 @@
 - [x] Add a manual workflow trigger and a crawl-completed local trigger with bounded execution.
 - [x] Add workflow activation, trigger filtering, and run-history recovery states.
 - [x] Expose bounded workflow run history through a read-only local API for recovery and inspection.
-- [ ] Run full adversarial tests, document exact local usage, and synchronize every milestone to private GitHub.
+- [x] Run full adversarial tests, document exact local usage, and synchronize every milestone to private GitHub (`322f20962e723527094bf866aa190376a4f46794`).
