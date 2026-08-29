@@ -56,5 +56,7 @@ def test_knowledge_comparison_and_non_html_empty_state() -> None:
     assert comparison["added"][0]["content"] == "New text"
     assert comparison["removed"][0]["content"] == "Old text"
 
-    non_html = page().to_dict() | {"id": 1, "content_type": "application/pdf"}
-    assert extract_pages_knowledge([non_html], "crawl-empty") == []
+    pdf_page = page().to_dict() | {"id": 1, "content_type": "application/pdf", "source_html": "", "extracted_text": "PDF policy text is searchable locally."}
+    pdf_chunks = extract_pages_knowledge([pdf_page], "crawl-pdf")
+    assert len(pdf_chunks) == 1
+    assert "PDF policy text" in pdf_chunks[0].content

@@ -50,3 +50,11 @@
 - [x] Add explicit loading states for question and reindex HTMX actions and test them.
 - [x] Add a dedicated empty-index state when a completed crawl has zero searchable knowledge chunks and test it.
 - [x] Push the completed knowledge/RAG changes to private GitHub and record matching local and remote SHAs (`cce4b1c917cbb62809e18206e897632f3c1616de`).
+- [x] Define the expanded end-to-end website/document crawler contract, local data model, and privacy boundaries.
+- [x] Expand authorized acquisition and parsing for HTML, rendered DOM, PDFs, text resources, and unsupported-content evidence with explicit limits; image OCR remains a documented partial-support boundary.
+- [x] Build a complete local knowledge corpus with provenance, versioning, refresh, and crawl comparison.
+- [x] Validate end-to-end retrieval and answer grounding before adding generative RAG.
+- [ ] Design and implement hybrid lexical/vector RAG with local embeddings, chunking, vector storage, reranking, and citations.
+- [ ] Add agentic RAG planning, confidence, abstention, evaluation, and recovery controls.
+- [ ] Design and implement safe n8n-like nodes, triggers, workflow runs, and local database adapters after the RAG layer is stable.
+- [ ] Run full adversarial tests, document exact local usage, and synchronize every milestone to private GitHub.

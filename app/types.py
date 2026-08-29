@@ -45,6 +45,8 @@ class PageRecord:
     discovered_at: str = ""
     internal_inlinks: int = 0
     content_hash: str = ""
+    extracted_text: str = ""
+    extraction_error: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

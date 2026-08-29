@@ -35,6 +35,7 @@ Each crawl stores raw HTTP and rendered-browser evidence separately where applic
 | --- | --- |
 | HTTP and redirects | Requested URL, final URL, status code, content type, full redirect hops, fetch error, and response `X-Robots-Tag`. |
 | Source and rendering | Capped source HTML, rendered HTML, rendered visible text, render error, and document-size cap state. |
+| Documents and text resources | Bounded text-like resources and text-layer PDFs are extracted locally into searchable evidence; unsupported binaries and image-only PDFs retain an explicit extraction note instead of being treated as readable. |
 | On-page SEO | Title, meta description, headings, canonical, meta robots, structured-data blocks, and image `alt` attributes. |
 | Link graph | Source URL, normalized target, anchor text, link `rel`, same-host status, and nofollow status. |
 | Reproducibility | Crawl creation and completion time, acknowledged authorization, crawl mode, URL cap, delay, and nofollow behavior. |
@@ -90,7 +91,7 @@ FastAPI request validation ──► SQLite job ledger (local `data/`)
         SQLite FTS5 knowledge chunks ──► cited local questions / read-only API
 ```
 
-`app/crawler.py` owns collection and is deliberately limited to a single host and local crawl settings. `app/parser.py` converts source or rendered HTML into structured records. `app/knowledge.py` extracts citation-preserving readable chunks. `app/qa.py` answers from retrieved local evidence and abstains when support is insufficient. `app/analyzer.py` is a deterministic transformation from persisted evidence to issue rows. `app/database.py` is the SQLite persistence boundary and durable job ledger; it supports safe startup recovery, bounded retry timing, circuit-breaker pauses, explicit operator resume, and FTS5 knowledge retrieval. `app/exports.py` writes reproducible local exports. `app/templates/` and `app/static/` provide the Field Manual HTMX interface.
+`app/crawler.py` owns collection and is deliberately limited to a single host and local crawl settings. `app/parser.py` converts source or rendered HTML into structured records. `app/documents.py` extracts bounded text-like resources and text-layer PDFs with explicit partial-support errors. `app/knowledge.py` extracts citation-preserving readable chunks. `app/qa.py` answers from retrieved local evidence and abstains when support is insufficient. `app/analyzer.py` is a deterministic transformation from persisted evidence to issue rows. `app/database.py` is the SQLite persistence boundary and durable job ledger; it supports safe startup recovery, bounded retry timing, circuit-breaker pauses, explicit operator resume, and FTS5 knowledge retrieval. `app/exports.py` writes reproducible local exports. `app/templates/` and `app/static/` provide the Field Manual HTMX interface.
 
 ### Local worker and recovery behavior
 

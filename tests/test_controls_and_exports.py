@@ -169,6 +169,8 @@ def test_malformed_html_and_non_html_are_safe_and_render_failure_is_recoverable(
     assert not links
     assert pages[0].content_type == "application/pdf"
     assert pages[0].source_html == ""
+    assert pages[0].extracted_text == ""
+    assert "PDF text extraction failed" in pages[0].extraction_error
 
     class BrokenPage:
         def goto(self, *args: object, **kwargs: object) -> None:

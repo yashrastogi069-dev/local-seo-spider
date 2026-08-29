@@ -72,6 +72,8 @@ def extract_knowledge_chunks(page: dict[str, Any], crawl_id: str, max_chars: int
     blocks = _blocks_from_html(html)
     if not blocks and page.get("rendered_text"):
         blocks = [("", _clean_text(str(page["rendered_text"]))) ]
+    if not blocks and page.get("extracted_text"):
+        blocks = [("", _clean_text(str(page["extracted_text"]))) ]
 
     chunks: list[KnowledgeChunk] = []
     pending_heading = ""
@@ -125,7 +127,9 @@ def compare_knowledge(current: list[dict[str, Any]], baseline: list[dict[str, An
 def extract_pages_knowledge(pages: list[dict[str, Any]], crawl_id: str) -> list[KnowledgeChunk]:
     chunks: list[KnowledgeChunk] = []
     for page in pages:
-        if page.get("content_type", "").lower().split(";", 1)[0] not in {"", "text/html", "application/xhtml+xml"}:
+        content_type = page.get("content_type", "").lower().split(";", 1)[0]
+        supported = {"", "text/html", "application/xhtml+xml", "application/pdf", "application/json", "application/ld+json", "application/xml", "text/xml", "text/plain", "text/csv"}
+        if content_type not in supported and not content_type.startswith("text/"):
             continue
         if page.get("fetch_error") or not page.get("robots_allowed", True):
             continue

@@ -48,7 +48,7 @@ class Database:
                   url TEXT NOT NULL, final_url TEXT NOT NULL, status_code INTEGER, content_type TEXT NOT NULL,
                   title TEXT NOT NULL, description TEXT NOT NULL, headings_json TEXT NOT NULL, canonical TEXT NOT NULL,
                   meta_robots TEXT NOT NULL, x_robots TEXT NOT NULL, source_html TEXT NOT NULL, rendered_html TEXT NOT NULL,
-                  rendered_text TEXT NOT NULL, images_json TEXT NOT NULL, structured_data_json TEXT NOT NULL,
+                  rendered_text TEXT NOT NULL, extracted_text TEXT NOT NULL DEFAULT '', extraction_error TEXT NOT NULL DEFAULT '', images_json TEXT NOT NULL, structured_data_json TEXT NOT NULL,
                   redirects_json TEXT NOT NULL, fetch_error TEXT NOT NULL, render_error TEXT NOT NULL,
                   robots_allowed INTEGER NOT NULL, body_truncated INTEGER NOT NULL, discovered_at TEXT NOT NULL,
                   internal_inlinks INTEGER NOT NULL DEFAULT 0, content_hash TEXT NOT NULL
@@ -80,6 +80,15 @@ class Database:
                 """
             )
             self._ensure_crawl_columns(conn)
+            self._ensure_page_columns(conn)
+
+    @staticmethod
+    def _ensure_page_columns(conn: sqlite3.Connection) -> None:
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(pages)")}
+        required = {"extracted_text": "TEXT NOT NULL DEFAULT ''", "extraction_error": "TEXT NOT NULL DEFAULT ''"}
+        for name, definition in required.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE pages ADD COLUMN {name} {definition}")
 
     @staticmethod
     def _ensure_crawl_columns(conn: sqlite3.Connection) -> None:
@@ -214,14 +223,15 @@ class Database:
             conn.execute("DELETE FROM pages WHERE crawl_id = ?", (crawl_id,))
             conn.executemany(
                 """INSERT INTO pages (crawl_id, url, final_url, status_code, content_type, title, description, headings_json,
-                   canonical, meta_robots, x_robots, source_html, rendered_html, rendered_text, images_json, structured_data_json,
+                   canonical, meta_robots, x_robots, source_html, rendered_html, rendered_text, extracted_text, extraction_error, images_json, structured_data_json,
                    redirects_json, fetch_error, render_error, robots_allowed, body_truncated, discovered_at, internal_inlinks, content_hash)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+""",
                 [
                     (
                         crawl_id, page.url, page.final_url, page.status_code, page.content_type, page.title, page.description,
                         json.dumps(page.headings), page.canonical, page.meta_robots, page.x_robots, page.source_html,
-                        page.rendered_html, page.rendered_text, json.dumps(page.images), json.dumps(page.structured_data),
+                        page.rendered_html, page.rendered_text, page.extracted_text, page.extraction_error, json.dumps(page.images), json.dumps(page.structured_data),
                         json.dumps(page.redirect_chain), page.fetch_error, page.render_error, int(page.robots_allowed),
                         int(page.body_truncated), page.discovered_at, page.internal_inlinks, page.content_hash,
                     ) for page in pages

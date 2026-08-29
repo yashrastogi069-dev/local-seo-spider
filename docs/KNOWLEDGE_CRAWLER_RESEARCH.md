@@ -30,3 +30,27 @@ Source: https://proceedings.neurips.cc/paper_files/paper/2020/hash/6b493230-Abst
 ## References
 
 3. [Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks](https://proceedings.neurips.cc/paper_files/paper/2020/hash/6b493230-Abstract.html)
+
+## Expanded ingestion and vector storage research
+
+Playwright’s official Python documentation provides a Download API for obtaining a download URL, filename, and payload stream, which supports treating authorized downloadable documents as bounded crawl artifacts rather than silently ignoring them: https://playwright.dev/python/docs/downloads
+
+The official pypdf documentation supports extracting text from text-layer PDFs, while image-only or heavily graphical PDFs require a separate OCR path and should be reported as partial extraction rather than treated as complete: https://pypdf.readthedocs.io/en/latest/user/extract-text.html
+
+The sqlite-vec project documents a SQLite extension for storing and querying float, int8, and binary vectors across Linux, macOS, and Windows. It is a promising optional vector-search adapter, but the implementation should retain a pure-Python/SQLite fallback because extension availability and approximate-nearest-neighbor behavior must be tested on the user’s machine: https://github.com/asg017/sqlite-vec
+
+## References
+
+4. [Playwright Python Downloads](https://playwright.dev/python/docs/downloads)
+5. [pypdf Extract Text from a PDF](https://pypdf.readthedocs.io/en/latest/user/extract-text.html)
+6. [sqlite-vec](https://github.com/asg017/sqlite-vec)
+
+## Hybrid RAG research
+
+Sentence Transformers documents semantic search as encoding queries and corpus passages into a shared embedding space, which supports a dense retrieval stage alongside lexical search: https://sbert.net/examples/sentence_transformer/applications/semantic-search/README.html
+
+The design will use hybrid retrieval rather than replacing FTS5: lexical search is valuable for exact names, identifiers, prices, and policy terms, while embeddings help with paraphrases. A pure SQLite fallback remains the baseline, with an optional sqlite-vec adapter and model-backed embeddings behind explicit local configuration. Any generated answer must retain retrieved evidence, source citations, confidence signals, and abstention when retrieval is weak.
+
+## References
+
+7. [Sentence Transformers Semantic Search](https://sbert.net/examples/sentence_transformer/applications/semantic-search/README.html)

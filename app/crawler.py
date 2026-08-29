@@ -10,6 +10,7 @@ from urllib import robotparser
 import httpx
 
 from app.config import Settings
+from app.documents import extract_document_text
 from app.parser import extract_links, extract_page_signals, normalized_text, text_hash
 from app.types import CrawlRequest, LinkRecord, PageRecord
 from app.urltools import UrlValidationError, is_same_host, normalize_url
@@ -87,7 +88,7 @@ class CrawlEngine:
         pages: list[PageRecord] = []
         links: list[LinkRecord] = []
         last_request_at = 0.0
-        headers = {"User-Agent": self.settings.user_agent, "Accept": "text/html,application/xhtml+xml"}
+        headers = {"User-Agent": self.settings.user_agent, "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json,application/xml,text/csv"}
 
         with httpx.Client(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
             robots, robots_status = self._robots(client, request.start_url)
@@ -128,6 +129,7 @@ class CrawlEngine:
                         continue
                     content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
                     source_html = response.text[: self.settings.max_document_bytes] if "html" in content_type else ""
+                    extracted_text, extraction_error = ("", "") if source_html else extract_document_text(content_type, response.content[: self.settings.max_document_bytes])
                     body_truncated = len(response.content) > self.settings.max_document_bytes
                     final_url = normalize_url(str(response.url))
                     render_html, rendered_text, render_error = self._render(browser_page, final_url) if source_html else ("", "", "")
@@ -142,7 +144,7 @@ class CrawlEngine:
                             title=selected["title"] or source_signals["title"], description=selected["description"] or source_signals["description"],
                             headings=selected["headings"] or source_signals["headings"], canonical=selected["canonical"] or source_signals["canonical"],
                             meta_robots=selected["meta_robots"] or source_signals["meta_robots"], x_robots=response.headers.get("x-robots-tag", "").lower(),
-                            source_html=source_html, rendered_html=render_html, rendered_text=rendered_text, images=selected["images"] or source_signals["images"],
+                            source_html=source_html, rendered_html=render_html, rendered_text=rendered_text, extracted_text=extracted_text, extraction_error=extraction_error, images=selected["images"] or source_signals["images"],
                             structured_data=selected["structured_data"] or source_signals["structured_data"], redirect_chain=redirect_chain,
                             fetch_error=fetch_error, render_error=render_error, robots_allowed=True, body_truncated=body_truncated,
                             discovered_at=self._now(), content_hash=text_hash(rendered_text or source_html),
