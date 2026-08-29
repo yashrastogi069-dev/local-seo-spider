@@ -71,6 +71,6 @@
 - [x] Add local UI/configuration controls and document when each concurrency mode is appropriate.
 - [x] Add adversarial and performance regression coverage, update documentation, and synchronize the advanced scraping milestone to private GitHub (`9b211641b2fa855b049f721bb5dcbf133c37914c`).
 - [x] Add a CI-safe executor performance/concurrency regression assertion that protects bounded parallel work without flaky wall-clock thresholds.
-- [ ] Push the post-validation performance-coverage update to private GitHub and verify local and remote SHAs match.
+- [x] Push the post-validation performance-coverage update to private GitHub and verify local and remote SHAs match (`8492fdab1ac702b9fdf4385488e212e13be6ffe6`).
 - [x] Document serial, thread, async, and process executor trade-offs and safe use cases in README/docs.
 - [x] Test that FastAPI accepts and persists per-crawl executor and extraction-profile fields.
