@@ -1,4 +1,6 @@
 from pathlib import Path
+import threading
+import time
 
 import pytest
 
@@ -34,6 +36,30 @@ def test_static_executor_modes_preserve_page_records(monkeypatch: pytest.MonkeyP
         assert all(page.title == "Fixture" for page in pages)
         assert links == []
         assert robots_status == "loaded"
+
+
+def test_thread_executor_performs_bounded_parallel_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = CrawlEngine(settings("thread"))
+    active = 0
+    peak = 0
+    state_lock = threading.Lock()
+    payload = (200, {"content-type": "text/html"}, b"<html><head><title>Fixture</title></head><body>content</body></html>", "https://owned.example/a")
+
+    def fetch(url: str):
+        nonlocal active, peak
+        with state_lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.03)
+        with state_lock:
+            active -= 1
+        return url, payload, [], ""
+
+    monkeypatch.setattr(engine, "_robots", lambda client, start_url: (type("Policy", (), {"can_fetch": lambda self, agent, url: True})(), "loaded"))
+    monkeypatch.setattr(engine, "_fetch_one_sync", fetch)
+    pages, _, _ = engine.run(request("thread"), lambda *_: None)
+    assert len(pages) == 2
+    assert 2 <= peak <= engine.settings.thread_workers
 
 
 def test_unknown_executor_mode_fails_closed() -> None:
