@@ -49,4 +49,4 @@
 - [x] Push the completed knowledge and RAG changes to private GitHub and verify local and remote SHAs match.
 - [x] Add explicit loading states for question and reindex HTMX actions and test them.
 - [x] Add a dedicated empty-index state when a completed crawl has zero searchable knowledge chunks and test it.
-- [ ] Push the completed knowledge/RAG changes to private GitHub and record matching local and remote SHAs.
+- [x] Push the completed knowledge/RAG changes to private GitHub and record matching local and remote SHAs (`cce4b1c917cbb62809e18206e897632f3c1616de`).
