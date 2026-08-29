@@ -64,7 +64,17 @@ The endpoint is scoped to one completed crawl and returns the question, grounded
 
 ## Future automation boundary
 
-The knowledge layer is designed so an automation tool such as n8n can later call the read-only question endpoint or receive explicit crawl-completed events. The current `/api/crawls/<crawl-id>/ask` endpoint is read-only and local. n8n supports webhook triggers and API-style responses, but any future integration must add explicit authentication, request validation, idempotency, local-network exposure controls, and operator approval. The default application remains local-only and does not connect to n8n or send crawl data anywhere.
+The knowledge layer now includes a small local workflow engine for n8n-style composition without importing n8n or exposing a public control plane. A workflow is a validated acyclic graph of bounded nodes. Available nodes are `core.input`, `crawl.status`, `knowledge.search`, `knowledge.ask`, and `local_db.query`. The database node accepts only one bounded read-only `SELECT` or `WITH` statement; no workflow node can start a crawl, submit a target-site form, mutate production content, or execute shell commands.
+
+Workflows can be saved and run through `POST /api/workflows` and `POST /api/workflows/<workflow-id>/run`. The manual run endpoint is the first trigger. An active workflow can also declare `{"type":"crawl.completed"}` with an optional normalized `start_url`; after a successful crawl and knowledge index, the local worker invokes matching workflows with the crawl ID as event input. Run outcomes are persisted and available through `GET /api/workflows/<workflow-id>/runs?limit=20`, capped for local recovery inspection. This provides a stable local boundary that n8n or another tool could call later, but the default application remains local-only and does not connect to n8n or send crawl data anywhere.
+
+A minimal workflow definition is:
+
+```json
+{"id":"site-question","name":"Answer site question","active":true,"trigger":{"type":"crawl.completed"},"nodes":[{"id":"ask","type":"knowledge.ask","config":{"crawl_id":"{{input.crawl_id}}","question":"What services are described?"}}],"edges":[]}
+```
+
+The knowledge layer is also designed so an external n8n instance can later call the existing read-only question endpoint or workflow API. n8n supports webhook triggers and API-style responses, but any future external integration must add explicit authentication, request validation, idempotency, local-network exposure controls, and operator approval. A local-only deployment should use loopback addresses and never forward crawl content to an untrusted workflow host.
 
 An optional local answer generator is now supported through a loopback-only Ollama-compatible endpoint. Set `SPIDER_ANSWER_PROVIDER=ollama` and configure the local model settings in `.env` only after installing and running the model locally. If the model is unavailable, the application falls back to deterministic evidence output. Hosted models remain intentionally unsupported by default because website passages would leave the machine; retrieval and citations remain the source of truth either way.
 

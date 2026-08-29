@@ -57,7 +57,10 @@
 - [x] Design and implement hybrid lexical/vector RAG with local embeddings, chunking, vector storage, reranking, and citations.
 - [x] Add optional local Sentence Transformers embedding installation and model metadata without changing the offline default.
 - [x] Add optional local answer synthesis with strict evidence-only prompting and deterministic fallback.
-- [ ] Add agentic RAG planning, confidence, abstention, evaluation, and recovery controls.
-- [ ] Add retrieval evaluation fixtures and confidence calibration against grounded and unrelated questions.
-- [ ] Design and implement safe n8n-like nodes, triggers, workflow runs, and local database adapters after the RAG layer is stable.
+- [x] Add agentic RAG planning, confidence, abstention, evaluation, and recovery controls.
+- [x] Add retrieval evaluation fixtures and confidence calibration against grounded and unrelated questions.
+- [x] Design and implement safe n8n-like nodes, triggers, workflow runs, and local database adapters after the RAG layer is stable.
+- [x] Add a manual workflow trigger and a crawl-completed local trigger with bounded execution.
+- [x] Add workflow activation, trigger filtering, and run-history recovery states.
+- [x] Expose bounded workflow run history through a read-only local API for recovery and inspection.
 - [ ] Run full adversarial tests, document exact local usage, and synchronize every milestone to private GitHub.

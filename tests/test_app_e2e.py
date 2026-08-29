@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 import app.main as main
 from app.database import Database
+from app.knowledge import extract_knowledge_chunks
 from app.types import CrawlRequest, LinkRecord, PageRecord
 
 
@@ -144,3 +145,47 @@ def test_operator_can_pause_and_resume_a_queued_local_job(tmp_path, monkeypatch)
         resumed = client.post(f"/crawls/{crawl_id}/resume", headers={"HX-Request": "true"})
         assert resumed.status_code == 200 and "LOCAL JOB QUEUED" in resumed.text
         assert main.database.get_crawl(crawl_id)["status"] == "queued"
+
+
+def test_local_workflow_api_runs_read_only_knowledge_nodes(tmp_path, monkeypatch) -> None:
+    local_settings = replace(main.settings, data_dir=tmp_path / "data", render_enabled=False)
+    monkeypatch.setattr(main, "settings", local_settings)
+    monkeypatch.setattr(main, "database", Database(local_settings.database_path))
+    monkeypatch.setattr(main, "_start_worker", lambda: None)
+
+    with TestClient(main.app) as client:
+        crawl_id = main.database.create_crawl(CrawlRequest("https://owned.example/", "site", max_urls=1, acknowledgment=True))
+        page = PageRecord(
+            url="https://owned.example/", final_url="https://owned.example/", status_code=200, content_type="text/html", title="Home", description="",
+            headings={"h1": ["Home"]}, canonical="", meta_robots="", x_robots="", source_html="<html><body><h1>Home</h1><p>Workshops are available.</p></body></html>",
+            rendered_html="", rendered_text="", images=[], structured_data=[], redirect_chain=[], discovered_at="2026-08-29T00:00:00+00:00", content_hash="workflow",
+        )
+        main.database.replace_pages_and_links(crawl_id, [page], [])
+        main.database.replace_knowledge_chunks(crawl_id, extract_knowledge_chunks(main.database.get_pages(crawl_id)[0], crawl_id))
+        main.database.update_crawl(crawl_id, status="completed", pages_crawled=1)
+        workflow = {
+            "id": "api-read",
+            "name": "API read workflow",
+            "nodes": [{"id": "search", "type": "knowledge.search", "config": {"crawl_id": crawl_id, "query": "workshops"}}],
+        }
+        saved = client.post("/api/workflows", json=workflow)
+        assert saved.status_code == 200
+        run = client.post("/api/workflows/api-read/run", json={})
+        assert run.status_code == 200
+        assert run.json()["status"] == "completed"
+        assert run.json()["outputs"]["search"]["results"]
+        history = client.get("/api/workflows/api-read/runs")
+        assert history.status_code == 200
+        assert history.json()[0]["status"] == "completed"
+        trigger = {
+            "id": "on-complete",
+            "name": "On complete question",
+            "active": True,
+            "trigger": {"type": "crawl.completed", "start_url": "https://owned.example/"},
+            "nodes": [{"id": "ask", "type": "knowledge.ask", "config": {"crawl_id": "{{input.crawl_id}}", "question": "What is available?"}}],
+        }
+        assert client.post("/api/workflows", json=trigger).status_code == 200
+        main._fire_crawl_completed_workflows(crawl_id, "https://owned.example/")
+        trigger_history = client.get("/api/workflows/on-complete/runs")
+        assert trigger_history.status_code == 200
+        assert trigger_history.json()[0]["status"] == "completed"

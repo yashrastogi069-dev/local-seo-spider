@@ -13,7 +13,7 @@ def answer_question(crawl_id: str, question: str, search: SearchFn, limit: int =
     """Return a deterministic, citation-backed answer without inventing unsupported facts."""
     cleaned = " ".join(question.split())
     if len(cleaned) < 3:
-        return {"question": cleaned, "answer": "Ask a more specific question about the crawled website.", "grounded": False, "citations": []}
+        return {"question": cleaned, "answer": "Ask a more specific question about the crawled website.", "grounded": False, "citations": [], "confidence": 0.0, "retrieval_mode": "agentic-hybrid"}
 
     results = search(crawl_id, cleaned, limit)
     if not results:
@@ -22,6 +22,8 @@ def answer_question(crawl_id: str, question: str, search: SearchFn, limit: int =
             "answer": "I could not find enough matching evidence in this crawl to answer that reliably.",
             "grounded": False,
             "citations": [],
+            "confidence": 0.0,
+            "retrieval_mode": "agentic-hybrid",
         }
 
     evidence_lines: list[str] = []

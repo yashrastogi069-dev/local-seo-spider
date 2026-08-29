@@ -27,6 +27,7 @@ from app.embeddings import build_embedding_provider
 from app.exports import write_csv_exports, write_html_report
 from app.types import CrawlRequest
 from app.urltools import UrlValidationError, is_same_host, normalize_url, visible_url
+from app.workflows import WorkflowDefinition, WorkflowEngine, trigger_matches, workflow_json
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSET_DIR = Path(os.environ.get("SPIDER_ASSET_DIR", str(ROOT / "assets")))
@@ -135,8 +136,23 @@ def _run_claimed_crawl(crawl_id: str, crawl_request: CrawlRequest) -> None:
         database.replace_knowledge_chunks(crawl_id, extract_pages_knowledge(stored_pages, crawl_id), _embedding_provider())
         database.replace_issues(crawl_id, issues)
         database.update_crawl(crawl_id, status="completed", completed_at=now(), robots_status=robots_status, pages_crawled=len(pages), issues_found=len(issues), pause_reason="")
+        _fire_crawl_completed_workflows(crawl_id, crawl_request.start_url)
     except Exception as exc:
         database.defer_or_pause_job(crawl_id, f"{type(exc).__name__}: {exc}")
+
+
+def _fire_crawl_completed_workflows(crawl_id: str, start_url: str) -> None:
+    event = {"crawl_id": crawl_id, "start_url": start_url, "event": "crawl.completed"}
+    for saved in database.list_workflows()[:16]:
+        if not saved or not saved.get("active"):
+            continue
+        try:
+            workflow = WorkflowDefinition.from_dict(saved["definition"], str(saved["id"]))
+            if trigger_matches(workflow, "crawl.completed", event):
+                WorkflowEngine(database, _answer_question).run(workflow, event)
+        except Exception:
+            # Automation failures are recorded per run and must not make a completed crawl look failed.
+            continue
 
 
 def _worker_loop() -> None:
@@ -358,6 +374,42 @@ def export(crawl_id: str, kind: str) -> FileResponse:
     else:
         raise HTTPException(404, "Unknown export type.")
     return FileResponse(path, filename=path.name, media_type="text/csv" if path.suffix == ".csv" else "text/html")
+
+
+@app.get("/api/workflows")
+def list_workflows() -> list[dict[str, object]]:
+    return [workflow for workflow in database.list_workflows() if workflow]
+
+
+@app.post("/api/workflows")
+async def save_workflow(request: Request) -> dict[str, object]:
+    try:
+        payload = await request.json()
+        workflow = WorkflowDefinition.from_dict(payload)
+        database.save_workflow(workflow.id, workflow.name, workflow_json(workflow), bool(payload.get("active", False)))
+        return database.get_workflow(workflow.id) or {"id": workflow.id, "name": workflow.name}
+    except Exception as exc:
+        raise HTTPException(422, f"Workflow was rejected: {exc}") from exc
+
+
+@app.get("/api/workflows/{workflow_id}/runs")
+def workflow_runs(workflow_id: str, limit: int = 20) -> list[dict[str, object]]:
+    if not database.get_workflow(workflow_id):
+        raise HTTPException(404, "Workflow was not found.")
+    return database.list_workflow_runs(workflow_id, limit)
+
+
+@app.post("/api/workflows/{workflow_id}/run")
+async def run_workflow(request: Request, workflow_id: str) -> dict[str, object]:
+    saved = database.get_workflow(workflow_id)
+    if not saved:
+        raise HTTPException(404, "Workflow was not found.")
+    try:
+        payload = await request.json()
+        workflow = WorkflowDefinition.from_dict(saved["definition"], workflow_id)
+        return WorkflowEngine(database, _answer_question).run(workflow, payload if isinstance(payload, dict) else {})
+    except Exception as exc:
+        raise HTTPException(422, f"Workflow could not run: {exc}") from exc
 
 
 @app.get("/health")

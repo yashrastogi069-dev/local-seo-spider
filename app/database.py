@@ -85,6 +85,16 @@ class Database:
                   provider TEXT NOT NULL, dimension INTEGER NOT NULL, embedding BLOB NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_vectors_crawl ON vector_embeddings(crawl_id);
+                CREATE TABLE IF NOT EXISTS workflows (
+                  id TEXT PRIMARY KEY, name TEXT NOT NULL, definition_json TEXT NOT NULL,
+                  active INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS workflow_runs (
+                  id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL REFERENCES workflows(id) ON DELETE CASCADE,
+                  created_at TEXT NOT NULL, completed_at TEXT, status TEXT NOT NULL,
+                  input_json TEXT NOT NULL, result_json TEXT NOT NULL DEFAULT '{}', error_message TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow ON workflow_runs(workflow_id, created_at);
                 """
             )
             self._ensure_crawl_columns(conn)
@@ -301,6 +311,69 @@ class Database:
         with self.connect() as conn:
             row = conn.execute("SELECT COUNT(*) AS count FROM knowledge_chunks WHERE crawl_id = ?", (crawl_id,)).fetchone()
         return int(row["count"]) if row else 0
+
+    def save_workflow(self, workflow_id: str, name: str, definition_json: str, active: bool = False) -> None:
+        timestamp = now()
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO workflows (id, name, definition_json, active, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET name=excluded.name, definition_json=excluded.definition_json,
+                   active=excluded.active, updated_at=excluded.updated_at""",
+                (workflow_id, name, definition_json, int(active), timestamp, timestamp),
+            )
+
+    def get_workflow(self, workflow_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM workflows WHERE id = ?", (workflow_id,)).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["active"] = bool(result["active"])
+        result["definition"] = json.loads(result.pop("definition_json"))
+        return result
+
+    def list_workflows(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM workflows ORDER BY updated_at DESC").fetchall()
+        return [self.get_workflow(str(row["id"])) for row in rows if row]
+
+    def create_workflow_run(self, workflow_id: str, input_data: dict[str, Any]) -> str:
+        run_id = str(uuid4())
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO workflow_runs (id, workflow_id, created_at, status, input_json) VALUES (?, ?, ?, 'running', ?)",
+                (run_id, workflow_id, now(), json.dumps(input_data)),
+            )
+        return run_id
+
+    def finish_workflow_run(self, run_id: str, status: str, result: dict[str, Any]) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE workflow_runs SET completed_at = ?, status = ?, result_json = ?, error_message = ? WHERE id = ?",
+                (now(), status, json.dumps(result), str(result.get("error", "")), run_id),
+            )
+
+    def list_workflow_runs(self, workflow_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(int(limit), 100))
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM workflow_runs WHERE workflow_id = ? ORDER BY created_at DESC LIMIT ?", (workflow_id, bounded_limit)).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["input"] = json.loads(item.pop("input_json"))
+            item["result"] = json.loads(item.pop("result_json"))
+            result.append(item)
+        return result
+
+    def readonly_query(self, sql: str, params: list[Any] | tuple[Any, ...] | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        statement = sql.strip()
+        if not re.match(r"^(SELECT|WITH)\b", statement, re.IGNORECASE) or ";" in statement or re.search(r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|ATTACH|DETACH|CREATE|REPLACE|PRAGMA|VACUUM)\b", statement, re.IGNORECASE):
+            raise ValueError("Only one read-only SELECT or WITH query is allowed.")
+        bounded_limit = max(1, min(int(limit), 500))
+        with self.connect() as conn:
+            rows = conn.execute(f"SELECT * FROM ({statement}) LIMIT ?", tuple(params or ()) + (bounded_limit,)).fetchall()
+        return [dict(row) for row in rows]
 
     def vector_count(self, crawl_id: str) -> int:
         with self.connect() as conn:
