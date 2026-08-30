@@ -86,4 +86,4 @@
 - [x] Fix irrelevant hybrid retrieval and random answers by tracing query tokenization, chunk ranking, answer context assembly, and confidence/abstention gates.
 - [x] Add regression tests for exact-fact retrieval, distractor documents, citation correctness, and unsupported-question abstention.
 - [x] Validate RAG fixes with the full test suite and an end-to-end crawl/query smoke test.
-- [ ] Save and synchronize the grounded RAG fix to the private GitHub repository.
+- [x] Save and synchronize the grounded RAG fix to the private GitHub repository.
