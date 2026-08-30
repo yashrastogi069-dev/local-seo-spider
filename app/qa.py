@@ -26,9 +26,23 @@ def answer_question(crawl_id: str, question: str, search: SearchFn, limit: int =
             "retrieval_mode": "agentic-hybrid",
         }
 
+    scored_results = [result for result in results if "term_coverage" not in result or float(result.get("term_coverage", 0.0)) >= 0.5]
+    if not scored_results:
+        return {
+            "question": cleaned,
+            "answer": "I could not find enough matching evidence in this crawl to answer that reliably.",
+            "grounded": False,
+            "citations": [],
+            "confidence": 0.0,
+            "retrieval_mode": "agentic-hybrid",
+        }
+    if any("term_coverage" in result for result in scored_results):
+        best_coverage = max(float(result.get("term_coverage", 0.0)) for result in scored_results)
+        scored_results = [result for result in scored_results if float(result.get("term_coverage", 0.0)) >= max(0.5, best_coverage - 0.25)]
+
     evidence_lines: list[str] = []
     citations: list[dict[str, Any]] = []
-    for position, result in enumerate(results, start=1):
+    for position, result in enumerate(scored_results, start=1):
         heading = result.get("heading_path") or "Page content"
         evidence_lines.append(f"{position}. {result['content']} ({result['url']} · {heading})")
         citations.append({
@@ -39,12 +53,14 @@ def answer_question(crawl_id: str, question: str, search: SearchFn, limit: int =
             "page_id": result.get("page_id"),
         })
 
-    top_score = float(results[0].get("agentic_score", results[0].get("hybrid_score", 0.0))) if results else 0.0
-    confidence = min(0.99, max(0.2, 0.35 + top_score * 12))
+    top_result = scored_results[0]
+    top_score = float(top_result.get("agentic_score", top_result.get("hybrid_score", 0.0)))
+    coverage = float(top_result.get("term_coverage", 1.0))
+    confidence = min(0.99, max(0.2, 0.35 + top_score * 0.12 + coverage * 0.45))
     generated = ""
     if generator:
         try:
-            generated = generator(cleaned, results).strip()
+            generated = generator(cleaned, scored_results).strip()
         except Exception:
             # Optional local synthesis must never erase a usable, deterministic answer.
             generated = ""

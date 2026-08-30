@@ -74,6 +74,37 @@ def extract_links(html: str, page_url: str, seed_url: str) -> list[LinkRecord]:
     return records
 
 
+def extract_api_entry_points(html: str, page_url: str, seed_url: str) -> list[dict[str, Any]]:
+    """Record explicit API-like references for review; never fetch or submit them automatically."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    candidates: list[tuple[str, str, str]] = []
+    for script in soup.find_all("script", src=True):
+        candidates.append((str(script.get("src", "")), "script-src", "GET"))
+    patterns = (
+        (r"(?:fetch|axios\.(?:get|post|put|patch|request))\s*\(\s*[\"']([^\"']+)", "javascript-call", "GET"),
+        (r"[\"']((?:https?:)?//[^\"']+/(?:api|graphql)(?:/[^\"']*)?)[\"']", "inline-url", "GET"),
+        (r"[\"']((?:/|\./)?(?:api|graphql)(?:/[^\"']*)?)[\"']", "inline-path", "GET"),
+    )
+    raw_html = html or ""
+    for pattern, kind, method in patterns:
+        candidates.extend((match, kind, method) for match in re.findall(pattern, raw_html, flags=re.IGNORECASE))
+    results: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw, kind, method in candidates:
+        if not raw or raw.startswith(("data:", "javascript:", "mailto:", "tel:")):
+            continue
+        try:
+            target = normalize_url(raw, page_url)
+        except UrlValidationError:
+            continue
+        key = (target, kind)
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append({"url": target, "raw": raw, "kind": kind, "method": method, "is_internal": is_same_host(target, seed_url), "fetched": False})
+    return results[:100]
+
+
 def extract_page_signals(html: str, page_url: str, seed_url: str) -> dict[str, Any]:
     soup = BeautifulSoup(html or "", "html.parser")
     title = normalized_text(soup.title.get_text(" ", strip=True)) if soup.title else ""
@@ -98,5 +129,6 @@ def extract_page_signals(html: str, page_url: str, seed_url: str) -> dict[str, A
         "headings": headings,
         "images": images,
         "structured_data": parse_structured_data(soup),
+        "api_entry_points": extract_api_entry_points(html, page_url, seed_url),
         "links": extract_links(html, page_url, seed_url),
     }

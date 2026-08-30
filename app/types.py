@@ -38,6 +38,7 @@ class PageRecord:
     images: list[dict[str, str]]
     structured_data: list[dict[str, Any]]
     redirect_chain: list[dict[str, Any]]
+    api_entry_points: list[dict[str, Any]] = field(default_factory=list)
     fetch_error: str = ""
     render_error: str = ""
     robots_allowed: bool = True
@@ -79,6 +80,7 @@ class CrawlRequest:
     acknowledgment: bool = False
     executor_mode: str = "serial"
     extraction_profile_path: str = ""
+    follow_api_entry_points: bool = False
 
     def public_settings(self) -> dict[str, Any]:
         return {
@@ -89,6 +91,7 @@ class CrawlRequest:
             "url_list_count": len(self.url_list),
             "executor_mode": self.executor_mode,
             "extraction_profile": bool(self.extraction_profile_path),
+            "follow_api_entry_points": self.follow_api_entry_points,
         }
 
     def storage_payload(self) -> dict[str, Any]:
@@ -107,4 +110,5 @@ class CrawlRequest:
             acknowledgment=bool(payload["acknowledgment"]),
             executor_mode=str(payload.get("executor_mode", "serial")),
             extraction_profile_path=str(payload.get("extraction_profile_path", "")),
+            follow_api_entry_points=bool(payload.get("follow_api_entry_points", False)),
         )

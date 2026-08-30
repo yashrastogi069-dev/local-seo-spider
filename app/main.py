@@ -89,7 +89,7 @@ def _home_response(request: Request, error: str | None = None, status_code: int 
     )
 
 
-def _parse_request(start_url: str, mode: str, url_list: str, max_urls: str, delay_seconds: str, respect_nofollow: str | None, authorization_acknowledgment: str | None, executor_mode: str = "serial", extraction_profile_path: str = "") -> CrawlRequest:
+def _parse_request(start_url: str, mode: str, url_list: str, max_urls: str, delay_seconds: str, respect_nofollow: str | None, authorization_acknowledgment: str | None, executor_mode: str = "serial", extraction_profile_path: str = "", follow_api_entry_points: str | None = None) -> CrawlRequest:
     if authorization_acknowledgment != "yes":
         raise ValueError("Confirm that you own this site or have explicit permission to assess it before starting a crawl.")
     normalized_start = normalize_url(start_url)
@@ -134,7 +134,7 @@ def _parse_request(start_url: str, mode: str, url_list: str, max_urls: str, dela
         if not parsed_urls:
             raise ValueError("Paste at least one URL for exact URL list mode.")
         parsed_max = min(parsed_max, len(parsed_urls))
-    return CrawlRequest(normalized_start, mode, parsed_urls, parsed_max, parsed_delay, respect_nofollow == "yes", True, executor_mode, profile_path)
+    return CrawlRequest(normalized_start, mode, parsed_urls, parsed_max, parsed_delay, respect_nofollow == "yes", True, executor_mode, profile_path, follow_api_entry_points == "yes")
 
 
 def _run_claimed_crawl(crawl_id: str, crawl_request: CrawlRequest) -> None:
@@ -211,9 +211,10 @@ def create_crawl(
     authorization_acknowledgment: Annotated[str | None, Form()] = None,
     executor_mode: Annotated[str, Form()] = "serial",
     extraction_profile_path: Annotated[str, Form()] = "",
+    follow_api_entry_points: Annotated[str | None, Form()] = None,
 ) -> Response:
     try:
-        crawl_request = _parse_request(start_url, mode, url_list, max_urls, delay_seconds, respect_nofollow, authorization_acknowledgment, executor_mode, extraction_profile_path)
+        crawl_request = _parse_request(start_url, mode, url_list, max_urls, delay_seconds, respect_nofollow, authorization_acknowledgment, executor_mode, extraction_profile_path, follow_api_entry_points)
     except (ValueError, UrlValidationError) as exc:
         if request.headers.get("HX-Request") != "true":
             return _home_response(request, error=str(exc), status_code=422)

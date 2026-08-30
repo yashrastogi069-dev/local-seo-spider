@@ -110,7 +110,7 @@ class CrawlEngine:
             headings=selected["headings"] or source_signals["headings"], canonical=selected["canonical"] or source_signals["canonical"],
             meta_robots=selected["meta_robots"] or source_signals["meta_robots"], x_robots=response.headers.get("x-robots-tag", "").lower(),
             source_html=source_html, rendered_html=render_html, rendered_text=rendered_text, extracted_text=extracted_text, extraction_error=extraction_error, images=selected["images"] or source_signals["images"],
-            structured_data=selected["structured_data"] or source_signals["structured_data"], redirect_chain=redirect_chain,
+            structured_data=selected["structured_data"] or source_signals["structured_data"], api_entry_points=selected["api_entry_points"] or source_signals["api_entry_points"], redirect_chain=redirect_chain,
             fetch_error=fetch_error, render_error=render_error, robots_allowed=True, body_truncated=body_truncated,
             extracted_fields=extracted_fields, extraction_notes=extraction_notes,
             discovered_at=self._now(), content_hash=text_hash(rendered_text or source_html or extracted_text),
@@ -338,7 +338,7 @@ class CrawlEngine(CrawlEngine):
 
     @staticmethod
     def _empty_signals() -> dict[str, object]:
-        return {"title": "", "description": "", "headings": {}, "canonical": "", "meta_robots": "", "images": [], "structured_data": [], "links": []}
+        return {"title": "", "description": "", "headings": {}, "canonical": "", "meta_robots": "", "images": [], "structured_data": [], "api_entry_points": [], "links": []}
 
     @staticmethod
     def _dedupe_links(links: list[LinkRecord]) -> list[LinkRecord]:

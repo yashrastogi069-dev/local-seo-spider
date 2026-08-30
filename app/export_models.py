@@ -29,6 +29,7 @@ class PageExport(BaseModel):
     extraction_notes: list[str] = Field(default_factory=list)
     images: list[dict[str, Any]] = Field(default_factory=list)
     structured_data: list[dict[str, Any]] = Field(default_factory=list)
+    api_entry_points: list[dict[str, Any]] = Field(default_factory=list)
     redirect_chain: list[dict[str, Any]] = Field(default_factory=list)
     fetch_error: str = ""
     render_error: str = ""

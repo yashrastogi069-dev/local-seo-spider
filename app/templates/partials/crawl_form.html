@@ -23,6 +23,7 @@
       <div class="field"><label for="executor_mode">Executor mode</label><select id="executor_mode" name="executor_mode"><option value="serial">Serial + Playwright (safest)</option><option value="thread">Threaded static crawl</option><option value="async">Coroutine static crawl</option><option value="process">Multiprocess static crawl</option></select><p class="field-hint">Thread/async/process modes skip browser rendering and are best for high-volume static pages.</p></div>
       <div class="field"><label for="extraction_profile_path">Target-field profile <span class="optional">(optional)</span></label><input id="extraction_profile_path" name="extraction_profile_path" type="text" placeholder="extraction-profile.example.json" autocomplete="off" /><p class="field-hint">Local JSON profile with CSS, XPath, regex, attribute, or JSON-LD targets.</p></div>
     </div>
+    <label class="checkline"><input type="checkbox" name="follow_api_entry_points" value="yes" /><span><strong>Follow discovered GET API entry points.</strong><small>Opt-in: queues same-host, normalized API URLs found in HTML, JSON-LD, scripts, and data attributes. POST/forms and external hosts are never followed.</small></span></label>
   </section>
   <section class="field-group boundary-group" aria-labelledby="boundary-group-title"><div class="group-label"><span>03</span><strong id="boundary-group-title">Boundary record</strong><small>How the crawl is contained</small></div>
   <div class="form-columns">

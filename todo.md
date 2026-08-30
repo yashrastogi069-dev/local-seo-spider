@@ -72,5 +72,18 @@
 - [x] Add adversarial and performance regression coverage, update documentation, and synchronize the advanced scraping milestone to private GitHub (`9b211641b2fa855b049f721bb5dcbf133c37914c`).
 - [x] Add a CI-safe executor performance/concurrency regression assertion that protects bounded parallel work without flaky wall-clock thresholds.
 - [x] Push the post-validation performance-coverage update to private GitHub and verify local and remote SHAs match (`8492fdab1ac702b9fdf4385488e212e13be6ffe6`).
+- [ ] Add data collection, cleaning, normalization, and Pydantic-validated processing pipelines for crawl records and target fields.
+- [ ] Add bounded recursive traversal for normalized links, discovered API entry points, and target-data extraction while preserving host, robots, cap, and permission boundaries.
+- [ ] Add OCR for images and image-only PDFs with OCR confidence and explicit derived-evidence provenance.
+- [ ] Add a safe Windows backup command for local SQLite data, exports, and non-secret configuration.
+- [ ] Add an executor benchmark report covering serial, threaded, coroutine, and multiprocessing modes without flaky thresholds.
+- [ ] Strengthen rate control and HTTP error handling with transparent user-agent policy and Retry-After-aware bounded recovery.
+- [ ] Document the parsing library stack and validate static and dynamic parsing behavior with adversarial fixtures.
+- [ ] Validate all additions, update documentation, checkpoint, and push the complete milestone to private GitHub.
 - [x] Document serial, thread, async, and process executor trade-offs and safe use cases in README/docs.
 - [x] Test that FastAPI accepts and persists per-crawl executor and extraction-profile fields.
+
+- [x] Fix irrelevant hybrid retrieval and random answers by tracing query tokenization, chunk ranking, answer context assembly, and confidence/abstention gates.
+- [x] Add regression tests for exact-fact retrieval, distractor documents, citation correctness, and unsupported-question abstention.
+- [x] Validate RAG fixes with the full test suite and an end-to-end crawl/query smoke test.
+- [ ] Save and synchronize the grounded RAG fix to the private GitHub repository.

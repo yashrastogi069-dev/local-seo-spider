@@ -50,7 +50,7 @@ class Database:
                   url TEXT NOT NULL, final_url TEXT NOT NULL, status_code INTEGER, content_type TEXT NOT NULL,
                   title TEXT NOT NULL, description TEXT NOT NULL, headings_json TEXT NOT NULL, canonical TEXT NOT NULL,
                   meta_robots TEXT NOT NULL, x_robots TEXT NOT NULL, source_html TEXT NOT NULL, rendered_html TEXT NOT NULL,
-                  rendered_text TEXT NOT NULL, extracted_text TEXT NOT NULL DEFAULT '', extraction_error TEXT NOT NULL DEFAULT '', extracted_fields_json TEXT NOT NULL DEFAULT '{}', extraction_notes_json TEXT NOT NULL DEFAULT '[]', images_json TEXT NOT NULL, structured_data_json TEXT NOT NULL,
+                  rendered_text TEXT NOT NULL, extracted_text TEXT NOT NULL DEFAULT '', extraction_error TEXT NOT NULL DEFAULT '', extracted_fields_json TEXT NOT NULL DEFAULT '{}', extraction_notes_json TEXT NOT NULL DEFAULT '[]', images_json TEXT NOT NULL, structured_data_json TEXT NOT NULL, api_entry_points_json TEXT NOT NULL DEFAULT '[]',
                   redirects_json TEXT NOT NULL, fetch_error TEXT NOT NULL, render_error TEXT NOT NULL,
                   robots_allowed INTEGER NOT NULL, body_truncated INTEGER NOT NULL, discovered_at TEXT NOT NULL,
                   internal_inlinks INTEGER NOT NULL DEFAULT 0, content_hash TEXT NOT NULL
@@ -103,7 +103,7 @@ class Database:
     @staticmethod
     def _ensure_page_columns(conn: sqlite3.Connection) -> None:
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(pages)")}
-        required = {"extracted_text": "TEXT NOT NULL DEFAULT ''", "extraction_error": "TEXT NOT NULL DEFAULT ''", "extracted_fields_json": "TEXT NOT NULL DEFAULT '{}'", "extraction_notes_json": "TEXT NOT NULL DEFAULT '[]'"}
+        required = {"extracted_text": "TEXT NOT NULL DEFAULT ''", "extraction_error": "TEXT NOT NULL DEFAULT ''", "extracted_fields_json": "TEXT NOT NULL DEFAULT '{}'", "extraction_notes_json": "TEXT NOT NULL DEFAULT '[]'", "api_entry_points_json": "TEXT NOT NULL DEFAULT '[]'"}
         for name, definition in required.items():
             if name not in existing:
                 conn.execute(f"ALTER TABLE pages ADD COLUMN {name} {definition}")
@@ -241,15 +241,15 @@ class Database:
             conn.execute("DELETE FROM pages WHERE crawl_id = ?", (crawl_id,))
             conn.executemany(
                 """INSERT INTO pages (crawl_id, url, final_url, status_code, content_type, title, description, headings_json,
-                   canonical, meta_robots, x_robots, source_html, rendered_html, rendered_text, extracted_text, extraction_error, extracted_fields_json, extraction_notes_json, images_json, structured_data_json,
+                   canonical, meta_robots, x_robots, source_html, rendered_html, rendered_text, extracted_text, extraction_error, extracted_fields_json, extraction_notes_json, images_json, structured_data_json, api_entry_points_json,
                    redirects_json, fetch_error, render_error, robots_allowed, body_truncated, discovered_at, internal_inlinks, content_hash)
-                                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """,
                 [
                     (
                         crawl_id, page.url, page.final_url, page.status_code, page.content_type, page.title, page.description,
                         json.dumps(page.headings), page.canonical, page.meta_robots, page.x_robots, page.source_html,
-                        page.rendered_html, page.rendered_text, page.extracted_text, page.extraction_error, json.dumps(page.extracted_fields), json.dumps(page.extraction_notes), json.dumps(page.images), json.dumps(page.structured_data),
+                        page.rendered_html, page.rendered_text, page.extracted_text, page.extraction_error, json.dumps(page.extracted_fields), json.dumps(page.extraction_notes), json.dumps(page.images), json.dumps(page.structured_data), json.dumps(page.api_entry_points),
                         json.dumps(page.redirect_chain), page.fetch_error, page.render_error, int(page.robots_allowed),
                         int(page.body_truncated), page.discovered_at, page.internal_inlinks, page.content_hash,
                     ) for page in pages
@@ -380,26 +380,41 @@ class Database:
             row = conn.execute("SELECT COUNT(*) AS count FROM vector_embeddings WHERE crawl_id = ?", (crawl_id,)).fetchone()
         return int(row["count"]) if row else 0
 
+    @staticmethod
+    def _query_terms(query: str) -> list[str]:
+        stop_words = {"what", "which", "where", "when", "does", "this", "that", "the", "and", "for", "from", "with", "about", "are", "is", "how", "can", "tell", "please", "who", "was", "were", "will", "would", "could", "should", "has", "have", "had", "into", "your", "our", "their"}
+        terms = [term for term in re.findall(r"[\w][\w'-]{1,}", query.lower()) if term not in stop_words]
+        return list(dict.fromkeys(terms[:16]))
+
+    @staticmethod
+    def _coverage(item: dict[str, Any], terms: list[str]) -> float:
+        if not terms:
+            return 0.0
+        haystack = " ".join(str(item.get(key, "")) for key in ("title", "heading_path", "content")).lower()
+        return sum(1 for term in terms if re.search(rf"(?<![\w'-]){re.escape(term)}(?![\w'-])", haystack)) / len(terms)
+
     def search_hybrid_knowledge(self, crawl_id: str, query: str, limit: int = 6, embedder: EmbeddingProvider | None = None) -> list[dict[str, Any]]:
         """Fuse FTS5 and cosine retrieval using reciprocal-rank fusion."""
         lexical = self.search_knowledge(crawl_id, query, max(limit * 3, 12))
         lexical_rank = {int(item["id"]): position for position, item in enumerate(lexical, start=1)}
+        query_terms = self._query_terms(query)
         active_embedder = embedder or HashEmbeddingProvider()
         query_vector = active_embedder.embed(query)
         with self.connect() as conn:
             rows = conn.execute(
                 """SELECT k.id, k.page_id, k.url, k.title, k.heading_path, k.content, v.embedding
                    FROM vector_embeddings v JOIN knowledge_chunks k ON k.id = v.chunk_id
-                   WHERE v.crawl_id = ? AND v.dimension = ?""",
-                (crawl_id, len(query_vector)),
+                   WHERE v.crawl_id = ? AND v.provider = ? AND v.dimension = ?""",
+                (crawl_id, active_embedder.name, len(query_vector)),
             ).fetchall()
         vector_candidates = []
         for row in rows:
             similarity = cosine_similarity(query_vector, array("f", row["embedding"]))
-            # Feature hashing is lexical, not semantic: do not let random hash collisions answer an unrelated question.
-            if active_embedder.name == "hash" and not lexical:
+            # Hash vectors are a deterministic lexical fallback, not semantic understanding.
+            # They must never introduce vector-only candidates through collisions.
+            if active_embedder.name == "hash":
                 continue
-            if active_embedder.name != "hash" and similarity < 0.35:
+            if similarity < 0.48 or (lexical and int(row["id"]) not in lexical_rank and similarity < 0.68):
                 continue
             item = dict(row)
             item.pop("embedding", None)
@@ -411,15 +426,18 @@ class Database:
         candidates.update({int(item[0]["id"]): item[0] for item in vector_ranked})
         scored = []
         for chunk_id, item in candidates.items():
-            score = (1 / (60 + lexical_rank[chunk_id]) if chunk_id in lexical_rank else 0) + (1 / (60 + vector_rank[chunk_id]) if chunk_id in vector_rank else 0)
-            scored.append((score, item))
-        scored.sort(key=lambda item: (-item[0], str(item[1].get("url", "")), int(item[1].get("chunk_index", 0))))
-        return [dict(item, hybrid_score=score, retrieval_mode="hybrid") for score, item in scored[: max(1, min(limit, 20))]]
+            coverage = self._coverage(item, query_terms)
+            if coverage <= 0:
+                continue
+            lexical_score = 1 / (60 + lexical_rank[chunk_id]) if chunk_id in lexical_rank else 0
+            vector_score = 1 / (60 + vector_rank[chunk_id]) if chunk_id in vector_rank else 0
+            scored.append((coverage + lexical_score + vector_score, coverage, item))
+        scored.sort(key=lambda item: (-item[1], -item[0], str(item[2].get("url", "")), int(item[2].get("chunk_index", 0))))
+        return [dict(item, hybrid_score=score, term_coverage=coverage, retrieval_mode="hybrid") for score, coverage, item in scored[: max(1, min(limit, 20))]]
 
     def search_knowledge(self, crawl_id: str, query: str, limit: int = 6) -> list[dict[str, Any]]:
         """Search only one crawl and return ranked passages with verifiable provenance."""
-        stop_words = {"what", "which", "where", "when", "does", "this", "that", "the", "and", "for", "from", "with", "about", "does", "are", "is", "how", "can", "tell", "please"}
-        terms = [term for term in re.findall(r"[\w][\w'-]{1,}", query.lower()) if term not in stop_words]
+        terms = self._query_terms(query)
         if not terms:
             return []
         match_query = " OR ".join(f'"{term.replace(chr(34), "")}"' for term in terms[:12])
@@ -433,7 +451,15 @@ class Database:
                    ORDER BY rank LIMIT ?""",
                 (crawl_id, match_query, max(1, min(limit, 20))),
             ).fetchall()
-        return [dict(row) for row in rows]
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            coverage = self._coverage(item, terms)
+            if coverage > 0:
+                item["term_coverage"] = coverage
+                results.append(item)
+        results.sort(key=lambda item: (-float(item["term_coverage"]), float(item.get("rank", 0.0)), str(item.get("url", "")), int(item.get("chunk_index", 0))))
+        return results
 
     def get_pages(self, crawl_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -453,7 +479,7 @@ class Database:
 
     def _page_row(self, row: sqlite3.Row) -> dict[str, Any]:
         page = dict(row)
-        for key in ("headings_json", "images_json", "structured_data_json", "redirects_json", "extracted_fields_json", "extraction_notes_json"):
+        for key in ("headings_json", "images_json", "structured_data_json", "api_entry_points_json", "redirects_json", "extracted_fields_json", "extraction_notes_json"):
             page[key.removesuffix("_json")] = json.loads(page.pop(key))
         page["robots_allowed"] = bool(page["robots_allowed"])
         page["body_truncated"] = bool(page["body_truncated"])

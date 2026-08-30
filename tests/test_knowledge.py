@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 from app.database import Database
@@ -63,6 +64,38 @@ def test_hybrid_retrieval_persists_vectors_and_keeps_answer_grounded(tmp_path: P
     assert matches[0]["retrieval_mode"] == "hybrid"
     assert matches[0]["url"] == "https://owned.example/services"
     unknown = answer_question(crawl_id, "What is the moon made of?", database.search_hybrid_knowledge)
+    assert unknown["grounded"] is False
+    assert unknown["citations"] == []
+
+
+def test_hybrid_ranking_prefers_full_query_overlap_over_distractors_and_abstains(tmp_path: Path) -> None:
+    database = Database(tmp_path / "distractors.sqlite")
+    database.initialize()
+    crawl_id = database.create_crawl(CrawlRequest("https://owned.example/", "site", max_urls=5, acknowledgment=True))
+    exact = replace(
+        page(),
+        url="https://owned.example/faq",
+        final_url="https://owned.example/faq",
+        title="Onboarding FAQ",
+        source_html="<html><body><h1>Onboarding FAQ</h1><p>Enterprise onboarding workshops last fourteen days.</p></body></html>",
+    )
+    distractor = replace(
+        page(),
+        url="https://owned.example/about",
+        final_url="https://owned.example/about",
+        title="About the company",
+        source_html="<html><body><h1>About</h1><p>Our company provides training and documentation for teams.</p></body></html>",
+    )
+    database.replace_pages_and_links(crawl_id, [exact, distractor], [])
+    stored = database.get_pages(crawl_id)
+    database.replace_knowledge_chunks(crawl_id, [chunk for item in stored for chunk in extract_knowledge_chunks(item, crawl_id)])
+
+    matches = database.search_hybrid_knowledge(crawl_id, "How many days are enterprise onboarding workshops?")
+    assert matches
+    assert matches[0]["url"] == "https://owned.example/faq"
+    assert matches[0]["term_coverage"] >= 0.75
+    assert database.search_hybrid_knowledge(crawl_id, "What is the chemical composition of the moon?") == []
+    unknown = answer_question(crawl_id, "What is the chemical composition of the moon?", database.search_hybrid_knowledge)
     assert unknown["grounded"] is False
     assert unknown["citations"] == []
 
