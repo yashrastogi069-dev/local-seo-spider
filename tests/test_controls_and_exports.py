@@ -1,15 +1,18 @@
 """Focused verification of local crawl boundaries and reproducible export behavior."""
 
+from collections import deque
 from pathlib import Path
 
 import httpx
 import pytest
 
 from app.config import Settings
+from app.documents import extract_document_text
+from app.normalization import clean_text, clean_values, normalize_page_payload
 from app.crawler import CrawlEngine
 from app.exports import write_csv_exports, write_html_report, write_json_exports
 from app.parser import extract_page_signals
-from app.types import CrawlRequest
+from app.types import CrawlRequest, PageRecord
 from app.urltools import UrlValidationError, is_same_host, normalize_url, safe_filename
 
 
@@ -43,6 +46,46 @@ def test_profile_fields_flow_into_page_records_and_json_exports(tmp_path: Path) 
     exports = write_json_exports(tmp_path, sample_crawl(), [page.to_dict()], [])
     assert '"extracted_fields"' in exports["pages"].read_text(encoding="utf-8")
     assert exports["pages_jsonl"].read_text(encoding="utf-8").count("\\n") == 1
+
+
+def test_normalized_page_payload_is_pydantic_validated_and_preserves_raw_html() -> None:
+    payload = normalize_page_payload({"url": "HTTPS://Owned.Example/", "final_url": "HTTPS://Owned.Example/", "content_type": "text/html", "source_html": "<p>&amp;</p>", "title": "  Café  "})
+    assert payload["url"] == "https://owned.example/"
+    assert payload["title"] == "Café"
+    assert payload["source_html"] == "<p>&amp;</p>"
+
+
+def test_retry_after_normalization_and_optional_ocr_are_bounded() -> None:
+    response = httpx.Response(429, headers={"retry-after": "7"})
+    assert CrawlEngine._retry_delay(response, 0, 0.5) == 7
+    assert clean_text("  Café\u200b &amp; tea  ") == "Café & tea"
+    assert clean_values([" A ", "A", " B "]) == ["A", "B"]
+    text, note = extract_document_text("image/png", b"not-an-image")
+    assert text == ""
+    assert "OCR" in note
+
+
+def test_api_traversal_is_opt_in_same_host_get_only_and_bounded() -> None:
+    settings = Settings(
+        data_dir=Path("data"), user_agent="LocalSEOSpider/Test", default_url_cap=5, max_url_cap=10,
+        default_delay_seconds=0.1, request_timeout_seconds=2, render_timeout_ms=1_000, max_redirects=2,
+        max_document_bytes=20_000, max_request_retries=0, retry_backoff_seconds=0.1, max_concurrent_crawls=1, render_enabled=False,
+    )
+    engine = CrawlEngine(settings)
+    page = PageRecord(
+        url="https://owned.example/", final_url="https://owned.example/", status_code=200, content_type="text/html",
+        title="", description="", headings={}, canonical="", meta_robots="", x_robots="", source_html="", rendered_html="", rendered_text="", images=[], structured_data=[],
+        redirect_chain=[], api_entry_points=[
+            {"url": "https://owned.example/api/items", "method": "GET", "is_internal": True},
+            {"url": "https://owned.example/api/write", "method": "POST", "is_internal": True},
+            {"url": "https://external.example/api/items", "method": "GET", "is_internal": False},
+        ],
+    )
+    request = CrawlRequest("https://owned.example/", "site", max_urls=2, acknowledgment=True, follow_api_entry_points=True)
+    queue: deque[str] = deque()
+    queued: set[str] = set()
+    engine._enqueue_discovered(request, page, [], queue, queued)
+    assert list(queue) == ["https://owned.example/api/items"]
 
 
 def test_url_controls_normalize_scope_and_reject_unsafe_inputs() -> None:

@@ -5,6 +5,8 @@ from __future__ import annotations
 from io import BytesIO
 from typing import Any
 
+from app.ocr import ocr_image, ocr_pdf
+
 
 TEXT_TYPES = {
     "application/json",
@@ -31,9 +33,12 @@ def extract_document_text(content_type: str, payload: bytes, max_chars: int = 25
             text = text[:max_chars].strip()
             if text:
                 return text, ""
-            return "", "PDF contains no extractable text layer; OCR is not enabled."
+            ocr_text, ocr_note = ocr_pdf(bounded)
+            return ocr_text, ocr_note or "PDF contains no extractable text layer."
         except Exception as exc:  # A bad document is page-level evidence, not a worker failure.
             return "", f"PDF text extraction failed: {type(exc).__name__}: {exc}"
+    if normalized.startswith("image/"):
+        return ocr_image(bounded, suffix="." + normalized.split("/", 1)[1])
     if normalized in TEXT_TYPES or normalized.startswith("text/"):
         try:
             return bounded.decode("utf-8", errors="replace")[:max_chars].strip(), ""

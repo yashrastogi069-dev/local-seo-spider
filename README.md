@@ -35,12 +35,14 @@ Each crawl stores raw HTTP and rendered-browser evidence separately where applic
 | --- | --- |
 | HTTP and redirects | Requested URL, final URL, status code, content type, full redirect hops, fetch error, and response `X-Robots-Tag`. |
 | Source and rendering | Capped source HTML, rendered HTML, rendered visible text, render error, and document-size cap state. |
-| Documents and text resources | Bounded text-like resources and text-layer PDFs are extracted locally into searchable evidence; unsupported binaries and image-only PDFs retain an explicit extraction note instead of being treated as readable. |
+| Documents and text resources | Bounded text-like resources and text-layer PDFs are extracted locally into searchable evidence. Images and image-only PDFs use optional local Tesseract/pdftoppm OCR when installed and retain explicit derived-evidence notes when unavailable. |
 | On-page SEO | Title, meta description, headings, canonical, meta robots, structured-data blocks, and image `alt` attributes. |
 | Link graph | Source URL, normalized target, anchor text, link `rel`, same-host status, and nofollow status. |
 | Reproducibility | Crawl creation and completion time, acknowledged authorization, crawl mode, URL cap, delay, and nofollow behavior. |
 
-The crawl engine uses a direct HTTP request for headers and source HTML, then a bounded Playwright page visit for rendered DOM inspection. It does **not** submit forms, sign in, work around access controls, open pop-ups, collect credentials, or mutate target-site content. Playwright failure is a per-page, recoverable inspection warning; raw HTML findings remain available.
+The crawl engine uses a direct HTTP request for headers and source HTML, then a bounded Playwright page visit for rendered DOM inspection. It does **not** submit forms, sign in, work around access controls, open pop-ups, collect credentials, or mutate target-site content. Playwright failure is a per-page, recoverable inspection warning; raw HTML findings remain available. Source and extracted values are normalized with Unicode normalization, entity decoding, invisible-character removal, whitespace collapsing, deduplication, and bounded lengths before persistence.
+
+When **Follow discovered GET API entry points** is selected, the crawler recursively queues only normalized, same-host `GET` references discovered in HTML, JSON-LD, scripts, and data attributes. The existing URL cap, robots policy, delay, permission acknowledgement, and exact-host boundary apply to API URLs as well. `POST`, form submission, credentials, external hosts, and access-control bypass remain unsupported.
 
 ### Executor modes
 
@@ -107,7 +109,8 @@ FastAPI request validation ──► SQLite job ledger (local `data/`)
         SQLite FTS5 knowledge chunks ──► cited local questions / read-only API
 ```
 
-`app/crawler.py` owns collection and is deliberately limited to a single host and local crawl settings. `app/parser.py` converts source or rendered HTML into structured records. `app/documents.py` extracts bounded text-like resources and text-layer PDFs with explicit partial-support errors. `app/knowledge.py` extracts citation-preserving readable chunks. `app/embeddings.py` provides deterministic offline vectors and an optional local Sentence Transformers adapter. `app/agentic.py` provides bounded query planning. `app/qa.py` answers from retrieved local evidence and abstains when support is insufficient; `app/answering.py` provides the optional loopback-only local model adapter. `app/analyzer.py` is a deterministic transformation from persisted evidence to issue rows. `app/database.py` is the SQLite persistence boundary and durable job ledger; it supports safe startup recovery, bounded retry timing, circuit-breaker pauses, explicit operator resume, FTS5 retrieval, vector persistence, and hybrid ranking. `app/exports.py` writes reproducible local exports. `app/templates/` and `app/static/` provide the Field Manual HTMX interface.
+`app/crawler.py` owns collection and is deliberately limited to a single host and local crawl settings. `app/parser.py` converts source or rendered HTML into structured records. The parsing stack is deliberately layered: BeautifulSoup handles tolerant HTML and link/metadata extraction, lxml handles explicit XPath target fields, Playwright handles rendered DOM acquisition, pypdf handles PDF text layers, and optional pdftoppm plus Tesseract provide bounded OCR for image evidence. `app/documents.py` extracts bounded text-like resources and text-layer PDFs with explicit partial-support errors. Tests exercise malformed HTML, non-HTML responses, rendering failure, robots blocks, redirects, unsupported documents, and static/dynamic extraction boundaries.
+`app/knowledge.py` extracts citation-preserving readable chunks. `app/embeddings.py` provides deterministic offline vectors and an optional local Sentence Transformers adapter. `app/agentic.py` provides bounded query planning. `app/qa.py` answers from retrieved local evidence and abstains when support is insufficient; `app/answering.py` provides the optional loopback-only local model adapter. `app/analyzer.py` is a deterministic transformation from persisted evidence to issue rows. `app/database.py` is the SQLite persistence boundary and durable job ledger; it supports safe startup recovery, bounded retry timing, circuit-breaker pauses, explicit operator resume, FTS5 retrieval, vector persistence, and hybrid ranking. `app/exports.py` writes reproducible local exports. `app/templates/` and `app/static/` provide the Field Manual HTMX interface.
 
 ### Local worker and recovery behavior
 
@@ -129,7 +132,21 @@ To back up a completed audit, copy both the SQLite database and any selected exp
 cp -a data "$(date +%Y-%m-%d)-local-seo-spider-backup"
 ```
 
-To restore, replace the local `data/` directory while the application is stopped. The HTML report is self-contained and can be archived or opened locally without the application. Export filenames are constructed from a sanitized crawl identifier to prevent path traversal or unsafe filenames.
+To restore, replace the local `data/` directory while the application is stopped. The HTML report is self-contained and can be archived or opened locally without the application. Export filenames are constructed from a sanitized crawl identifier to prevent path traversal or unsafe filenames. The safer cross-platform backup command copies the SQLite database through SQLite's online backup API and includes documentation/configuration examples without copying `.env`, virtual environments, journals, or live exports:
+
+```bash
+.venv/bin/python tools/backup_data.py
+```
+
+On Windows Command Prompt, run `backup-local.cmd`; pass `--output D:\\protected\\seo-backup.zip` to choose a destination.
+
+To compare executor modes on an authorized list, run:
+
+```bash
+.venv/bin/python tools/benchmark_executors.py https://example.com/ https://example.com/about --output data/benchmark-report.json
+```
+
+The report is comparative rather than a promise of fixed speed because network conditions, server behavior, and the configured request delay affect timing. Transient HTTP responses now honor numeric or HTTP-date `Retry-After` values up to a five-minute bound, while the configured User-Agent remains transparent and is never rotated to evade controls.
 
 ## Development and tests
 

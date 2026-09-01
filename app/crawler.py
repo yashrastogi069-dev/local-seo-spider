@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from email.utils import parsedate_to_datetime
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from threading import Lock
@@ -14,8 +15,9 @@ import httpx
 
 from app.config import Settings
 from app.documents import extract_document_text
+from app.normalization import normalize_page_payload
 from app.extraction_profiles import extract_profile_fields, load_profile
-from app.parser import extract_links, extract_page_signals, normalized_text, text_hash
+from app.parser import extract_api_entry_points, extract_links, extract_page_signals, normalized_text, text_hash
 from app.types import CrawlRequest, LinkRecord, PageRecord
 from app.urltools import UrlValidationError, is_same_host, normalize_url
 
@@ -41,6 +43,21 @@ class CrawlEngine:
             policy.allow_all = True
             return policy, f"unavailable ({type(exc).__name__})"
 
+    @staticmethod
+    def _retry_delay(response: httpx.Response, attempt: int, base_seconds: float) -> float:
+        delay = base_seconds * (2 ** attempt)
+        value = response.headers.get("retry-after", "").strip()
+        if value:
+            try:
+                delay = max(delay, min(300.0, float(value)))
+            except ValueError:
+                try:
+                    retry_at = parsedate_to_datetime(value)
+                    delay = max(delay, min(300.0, max(0.0, retry_at.timestamp() - time.time())))
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        return delay
+
     def _fetch(self, client: httpx.Client, url: str) -> tuple[httpx.Response | None, list[dict[str, object]], str]:
         current = url
         hops: list[dict[str, object]] = []
@@ -57,7 +74,7 @@ class CrawlEngine:
                     continue
                 hops.append({"url": current, "status_code": response.status_code, "location": response.headers.get("location", ""), "attempt": attempt + 1})
                 if response.status_code in transient_statuses and attempt < self.settings.max_request_retries:
-                    time.sleep(self.settings.retry_backoff_seconds * (2 ** attempt))
+                    time.sleep(self._retry_delay(response, attempt, self.settings.retry_backoff_seconds))
                     continue
                 break
             if response is None:
@@ -96,6 +113,7 @@ class CrawlEngine:
         render_html, rendered_text, render_error = self._render(browser_page, final_url) if source_html else ("", "", "")
         source_signals = extract_page_signals(source_html, final_url, request.start_url) if source_html else self._empty_signals()
         rendered_signals = extract_page_signals(render_html, final_url, request.start_url) if render_html else self._empty_signals()
+        payload_api_entries = extract_api_entry_points(extracted_text, final_url, request.start_url) if extracted_text and not source_html else []
         selected_structured_data = rendered_signals["structured_data"] or source_signals["structured_data"]
         extracted_fields = extract_profile_fields(self.extraction_profile, final_url, source_html, render_html, selected_structured_data)
         extraction_notes = [
@@ -104,18 +122,19 @@ class CrawlEngine:
         ]
         selected = rendered_signals if rendered_signals["title"] or rendered_signals["links"] else source_signals
         page_links = self._dedupe_links(source_signals["links"] + rendered_signals["links"])
+        api_entry_points = self._dedupe_api_entry_points(source_signals["api_entry_points"] + rendered_signals["api_entry_points"] + payload_api_entries)
         page = PageRecord(
             url=url, final_url=final_url, status_code=response.status_code, content_type=content_type,
             title=selected["title"] or source_signals["title"], description=selected["description"] or source_signals["description"],
             headings=selected["headings"] or source_signals["headings"], canonical=selected["canonical"] or source_signals["canonical"],
             meta_robots=selected["meta_robots"] or source_signals["meta_robots"], x_robots=response.headers.get("x-robots-tag", "").lower(),
             source_html=source_html, rendered_html=render_html, rendered_text=rendered_text, extracted_text=extracted_text, extraction_error=extraction_error, images=selected["images"] or source_signals["images"],
-            structured_data=selected["structured_data"] or source_signals["structured_data"], api_entry_points=selected["api_entry_points"] or source_signals["api_entry_points"], redirect_chain=redirect_chain,
+            structured_data=selected["structured_data"] or source_signals["structured_data"], api_entry_points=api_entry_points, redirect_chain=redirect_chain,
             fetch_error=fetch_error, render_error=render_error, robots_allowed=True, body_truncated=body_truncated,
             extracted_fields=extracted_fields, extraction_notes=extraction_notes,
             discovered_at=self._now(), content_hash=text_hash(rendered_text or source_html or extracted_text),
         )
-        return page, page_links
+        return PageRecord(**normalize_page_payload(page.to_dict())), page_links
 
     @staticmethod
     def _response_payload(response: httpx.Response | None) -> tuple[int, dict[str, str], bytes, str] | None:
@@ -149,7 +168,7 @@ class CrawlEngine:
                     continue
                 hops.append({"url": current, "status_code": response.status_code, "location": response.headers.get("location", ""), "attempt": attempt + 1})
                 if response.status_code in transient_statuses and attempt < self.settings.max_request_retries:
-                    await asyncio.sleep(self.settings.retry_backoff_seconds * (2 ** attempt))
+                    await asyncio.sleep(self._retry_delay(response, attempt, self.settings.retry_backoff_seconds))
                     continue
                 break
             if response is None:
@@ -236,14 +255,7 @@ class CrawlEngine(CrawlEngine):
             for page, page_links in materialized:
                 pages.append(page)
                 links.extend(page_links)
-                if request.mode == "site":
-                    for link in page_links:
-                        if not link.is_internal or (request.respect_nofollow and link.nofollow) or link.target_url in queued:
-                            continue
-                        if len(queued) >= request.max_urls:
-                            break
-                        queued.add(link.target_url)
-                        queue.append(link.target_url)
+                self._enqueue_discovered(request, page, page_links, queue, queued)
                 progress(len(pages), len(queue), robots_status)
         return pages[: request.max_urls], links, robots_status
 
@@ -316,14 +328,7 @@ class CrawlEngine(CrawlEngine):
                     page, page_links = self._build_page(request, url, response, redirect_chain, fetch_error, browser_page)
                     links.extend(page_links)
                     pages.append(page)
-                    if request.mode == "site":
-                        for link in page_links:
-                            if not link.is_internal or (request.respect_nofollow and link.nofollow) or link.target_url in queued:
-                                continue
-                            if len(queued) >= request.max_urls:
-                                break
-                            queued.add(link.target_url)
-                            queue.append(link.target_url)
+                    self._enqueue_discovered(request, page, page_links, queue, queued)
                     progress(len(pages), len(queue), robots_status)
             finally:
                 if browser:
@@ -339,6 +344,29 @@ class CrawlEngine(CrawlEngine):
     @staticmethod
     def _empty_signals() -> dict[str, object]:
         return {"title": "", "description": "", "headings": {}, "canonical": "", "meta_robots": "", "images": [], "structured_data": [], "api_entry_points": [], "links": []}
+
+    def _enqueue_discovered(self, request: CrawlRequest, page: PageRecord, page_links: list[LinkRecord], queue: deque[str], queued: set[str]) -> None:
+        if request.mode != "site":
+            return
+        targets: list[str] = [link.target_url for link in page_links if link.is_internal and not (request.respect_nofollow and link.nofollow)]
+        if request.follow_api_entry_points:
+            targets.extend(str(entry.get("url", "")) for entry in page.api_entry_points if entry.get("method", "GET") == "GET" and entry.get("is_internal"))
+        for target in targets:
+            if not target or target in queued or len(queued) >= request.max_urls:
+                continue
+            queued.add(target)
+            queue.append(target)
+
+    @staticmethod
+    def _dedupe_api_entry_points(entries: list[dict[str, object]]) -> list[dict[str, object]]:
+        seen: set[tuple[str, str]] = set()
+        result: list[dict[str, object]] = []
+        for entry in entries:
+            key = (str(entry.get("url", "")), str(entry.get("method", "GET")).upper())
+            if key[0] and key not in seen:
+                seen.add(key)
+                result.append(dict(entry))
+        return result[:100]
 
     @staticmethod
     def _dedupe_links(links: list[LinkRecord]) -> list[LinkRecord]:
