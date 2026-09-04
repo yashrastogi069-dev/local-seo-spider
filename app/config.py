@@ -29,7 +29,7 @@ class Settings:
     max_concurrent_crawls: int
     render_enabled: bool
     extraction_profile_path: Path | None = None
-    embedding_provider: str = "hash"
+    embedding_provider: str = "sentence-transformers"
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_dimension: int = 384
     answer_provider: str = "evidence"
@@ -52,6 +52,9 @@ class Settings:
         configured_data_dir = Path(os.getenv("SPIDER_DATA_DIR", "./data"))
         data_dir = configured_data_dir if configured_data_dir.is_absolute() else root / configured_data_dir
         configured_profile = os.getenv("SPIDER_EXTRACTION_PROFILE_PATH", "").strip()
+        configured_embedding_provider = os.getenv("SPIDER_EMBEDDING_PROVIDER", "sentence-transformers").strip().lower()
+        if configured_embedding_provider in {"hash", "offline"} and not _as_bool(os.getenv("SPIDER_ALLOW_HASH_EMBEDDING", "false")):
+            configured_embedding_provider = "sentence-transformers"
         profile_path = None if not configured_profile else (Path(configured_profile) if Path(configured_profile).is_absolute() else root / configured_profile)
         return cls(
             data_dir=data_dir.resolve(),
@@ -68,7 +71,7 @@ class Settings:
             max_concurrent_crawls=max(1, int(os.getenv("SPIDER_MAX_CONCURRENT_CRAWLS", "1"))),
             render_enabled=_as_bool(os.getenv("SPIDER_RENDER_ENABLED", "true")),
             extraction_profile_path=profile_path.resolve() if profile_path else None,
-            embedding_provider=os.getenv("SPIDER_EMBEDDING_PROVIDER", "hash"),
+            embedding_provider=configured_embedding_provider,
             embedding_model=os.getenv("SPIDER_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
             embedding_dimension=max(8, min(4096, int(os.getenv("SPIDER_EMBEDDING_DIMENSION", "384")))),
             answer_provider=os.getenv("SPIDER_ANSWER_PROVIDER", "evidence"),

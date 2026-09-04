@@ -12,7 +12,7 @@ from app.types import CrawlRequest, LinkRecord, PageRecord
 
 
 def test_authorized_crawl_renders_audit_and_exports(tmp_path, monkeypatch) -> None:
-    local_settings = replace(main.settings, data_dir=tmp_path / "data", render_enabled=False)
+    local_settings = replace(main.settings, data_dir=tmp_path / "data", render_enabled=False, embedding_provider="hash")
     monkeypatch.setattr(main, "settings", local_settings)
     monkeypatch.setattr(main, "database", Database(local_settings.database_path))
 
@@ -60,6 +60,11 @@ def test_authorized_crawl_renders_audit_and_exports(tmp_path, monkeypatch) -> No
         assert "INSPECTION COMPLETE" in status.text
 
         ledger = client.get(f"/crawls/{crawl_id}")
+        for _ in range(300):
+            if "1 evidence chunks indexed" in ledger.text:
+                break
+            time.sleep(0.05)
+            ledger = client.get(f"/crawls/{crawl_id}")
         assert ledger.status_code == 200
         assert "Missing page title" in ledger.text
         assert "Self-contained HTML report" in ledger.text

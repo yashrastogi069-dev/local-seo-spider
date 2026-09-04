@@ -100,3 +100,48 @@
 - [x] Include local export files in safe backups while excluding secrets and transient SQLite journals.
 - [x] Harden benchmark input scope and validate a generated JSON report artifact.
 - [x] Add explicit parser-stack documentation and adversarial static/dynamic parsing tests.
+
+- [x] Replace default hash-vector retrieval with a configurable real local semantic embedding provider and explicit model/index metadata.
+- [x] Improve complex-query decomposition, semantic reranking, diversity, and evidence thresholds for grounded answers.
+- [x] Add an optional post-retrieval LLM synthesis layer with strict citation-only prompting, structured output validation, timeout, and deterministic fallback.
+- [x] Add end-to-end RAG quality tests for semantic paraphrases, multi-hop questions, distractors, citations, abstention, and LLM failure fallback.
+- [x] Document setup, model installation, privacy boundaries, and exact commands for the semantic RAG and LLM layers.
+
+- [x] Review the northstar GitHub repository and relevant open-source crawler/RAG patterns for safe, reusable design ideas.
+- [x] Replace the default hash-vector path with a real local semantic embedding workflow and model/index lifecycle.
+- [x] Upgrade structure-aware chunking, query decomposition, hybrid retrieval, reranking, diversity, and multi-hop evidence assembly.
+- [x] Add an optional final LLM layer with strict evidence-only prompting, citation validation, timeout, and deterministic fallback.
+- [x] Add end-to-end quality tests for semantic paraphrases, complex questions, distractors, citations, abstention, and LLM failure.
+- [x] Checkpoint and synchronize the upgraded crawler/RAG milestone to the private GitHub repository.
+
+- [x] Make real local semantic embeddings the active default and never silently downgrade configured semantic mode to hash vectors.
+- [x] Add dense-first retrieval with candidate expansion, score calibration, source diversity, and explicit lexical-complement diagnostics.
+- [x] Add structure-aware chunk metadata and complex-query evidence-set assembly for multi-part and multi-hop questions.
+- [x] Enforce final-answer citation validation and deterministic abstention when semantic evidence is weak or contradictory.
+- [x] Add quality evaluation for paraphrases, exact facts, multi-part questions, distractors, unsupported queries, and LLM failures.
+- [x] Run full validation, checkpoint, and synchronize the upgraded semantic RAG implementation to private GitHub.
+
+- [x] Update the end-to-end crawl test to wait for the durable semantic index completion after crawl completion, while preserving visible recovery behavior when indexing is unavailable.
+
+- [x] Implement and test source-diversity controls plus explicit lexical-versus-semantic diagnostic metadata in retrieval results.
+- [x] Add regression coverage and retrieval evidence-set assembly for multi-part and multi-hop questions.
+- [x] Add contradictory-evidence detection and safe abstention behavior with tests.
+- [x] Save a new recoverable checkpoint and push/verify the semantic-RAG upgrade on private GitHub after these gaps are closed.
+
+- [x] Add true crawl-to-index-to-retrieve-to-answer tests for semantic paraphrases, distractor pages, citation validation, abstention, and LLM fallback.
+- [x] Assert hybrid retrieval exposes semantic score, lexical-match, term-coverage, and fusion diagnostics.
+- [x] Implement explicit bounded multi-hop evidence assembly with hop provenance and regression coverage.
+- [x] Save a new recoverable checkpoint and push/verify the semantic-RAG upgrade after all quality gaps pass.
+
+- [x] Add a true background-worker-path crawl-to-index-to-answer regression using the real semantic provider, including paraphrase retrieval, distractor rejection, abstention, and LLM fallback.
+
+- [x] Assert end-to-end semantic retrieval excludes the distractor page from the supported answer evidence and citations.
+
+- [x] Add structured JSON response validation for optional LLM synthesis, including answer and citation fields with safe freeform fallback handling.
+- [x] Add a true worker-path end-to-end multi-hop evidence test across indexed supporting pages.
+- [x] Add a full crawl/index/retrieve test proving malformed or uncited LLM output is rejected.
+
+- [x] Add a worker-path end-to-end semantic RAG test where supporting facts live across multiple indexed pages and verify answer assembly plus hop provenance.
+- [x] Add a crawl-to-index-to-retrieve malformed structured-LLM fallback regression through the application path.
+
+- [x] Assert the multi-hop end-to-end answer text itself combines both indexed facts, not only their citations and hop metadata.

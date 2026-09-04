@@ -414,7 +414,7 @@ class Database:
             # They must never introduce vector-only candidates through collisions.
             if active_embedder.name == "hash":
                 continue
-            if similarity < 0.48 or (lexical and int(row["id"]) not in lexical_rank and similarity < 0.68):
+            if similarity < 0.38:
                 continue
             item = dict(row)
             item.pop("embedding", None)
@@ -427,13 +427,16 @@ class Database:
         scored = []
         for chunk_id, item in candidates.items():
             coverage = self._coverage(item, query_terms)
-            if coverage <= 0:
+            if coverage <= 0 and float(item.get("vector_similarity", 0.0)) < 0.38:
                 continue
             lexical_score = 1 / (60 + lexical_rank[chunk_id]) if chunk_id in lexical_rank else 0
-            vector_score = 1 / (60 + vector_rank[chunk_id]) if chunk_id in vector_rank else 0
-            scored.append((coverage + lexical_score + vector_score, coverage, item))
-        scored.sort(key=lambda item: (-item[1], -item[0], str(item[2].get("url", "")), int(item[2].get("chunk_index", 0))))
-        return [dict(item, hybrid_score=score, term_coverage=coverage, retrieval_mode="hybrid") for score, coverage, item in scored[: max(1, min(limit, 20))]]
+            vector_similarity = float(item.get("vector_similarity", 0.0))
+            vector_score = vector_similarity if chunk_id in vector_rank else 0
+            # Dense similarity carries the semantic decision; lexical coverage and FTS rank refine it.
+            score = (0.72 * vector_score) + (0.20 * coverage) + (0.08 * lexical_score)
+            scored.append((score, coverage, item))
+        scored.sort(key=lambda item: (-item[0], -item[1], str(item[2].get("url", "")), int(item[2].get("chunk_index", 0))))
+        return [dict(item, hybrid_score=score, term_coverage=coverage, retrieval_mode="hybrid", semantic_first=True, semantic_score=float(item.get("vector_similarity", 0.0)), lexical_match=item.get("id") in lexical_rank) for score, coverage, item in scored[: max(1, min(limit, 20))]]
 
     def search_knowledge(self, crawl_id: str, query: str, limit: int = 6) -> list[dict[str, Any]]:
         """Search only one crawl and return ranked passages with verifiable provenance."""

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import threading
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
 
@@ -146,10 +147,15 @@ def _run_claimed_crawl(crawl_id: str, crawl_request: CrawlRequest) -> None:
         pages, links, robots_status = CrawlEngine(settings).run(crawl_request, progress)
         issues = analyze_pages(pages, links, crawl_request.start_url)
         database.replace_pages_and_links(crawl_id, pages, links)
-        stored_pages = database.get_pages(crawl_id)
-        database.replace_knowledge_chunks(crawl_id, extract_pages_knowledge(stored_pages, crawl_id), _embedding_provider())
         database.replace_issues(crawl_id, issues)
-        database.update_crawl(crawl_id, status="completed", completed_at=now(), robots_status=robots_status, pages_crawled=len(pages), issues_found=len(issues), pause_reason="")
+        # Fetch completion is durable and should not be blocked by a first-time model download.
+        database.update_crawl(crawl_id, status="completed", completed_at=now(), robots_status=robots_status, pages_crawled=len(pages), issues_found=len(issues), pause_reason="Indexing knowledge locally…")
+        try:
+            stored_pages = database.get_pages(crawl_id)
+            database.replace_knowledge_chunks(crawl_id, extract_pages_knowledge(stored_pages, crawl_id), _embedding_provider(settings.embedding_provider, settings.embedding_model, settings.embedding_dimension))
+            database.update_crawl(crawl_id, pause_reason="")
+        except Exception as index_exc:
+            database.update_crawl(crawl_id, pause_reason=f"Knowledge indexing pending: {type(index_exc).__name__}: {index_exc}")
         _fire_crawl_completed_workflows(crawl_id, crawl_request.start_url)
     except Exception as exc:
         database.defer_or_pause_job(crawl_id, f"{type(exc).__name__}: {exc}")
@@ -288,16 +294,18 @@ def crawl_comparison(request: Request, crawl_id: str, baseline_id: str) -> HTMLR
     return templates.TemplateResponse(request, "crawl_comparison.html", _context(request, crawl=current, baseline=baseline, comparison=comparison))
 
 
-def _embedding_provider():
+@lru_cache(maxsize=2)
+def _embedding_provider(provider: str, model: str, dimension: int):
     try:
-        return build_embedding_provider(settings.embedding_provider, settings.embedding_model, settings.embedding_dimension)
-    except Exception:
-        # A missing optional semantic model never blocks local crawling; hash retrieval remains available.
-        return build_embedding_provider("hash", dimension=settings.embedding_dimension)
+        return build_embedding_provider(provider, model, dimension)
+    except Exception as exc:
+        if provider.strip().lower() in {"hash", "offline"}:
+            return build_embedding_provider("hash", dimension=dimension)
+        raise RuntimeError(f"Semantic embedding provider unavailable: {exc}. Install the semantic extra or explicitly set SPIDER_EMBEDDING_PROVIDER=hash for lexical-only mode.") from exc
 
 
 def _search_knowledge(crawl_id: str, query: str, limit: int = 6) -> list[dict[str, object]]:
-    return agentic_retrieve(crawl_id, query, lambda cid, subquery, sublimit: database.search_hybrid_knowledge(cid, subquery, sublimit, _embedding_provider()), limit)
+    return agentic_retrieve(crawl_id, query, lambda cid, subquery, sublimit: database.search_hybrid_knowledge(cid, subquery, sublimit, _embedding_provider(settings.embedding_provider, settings.embedding_model, settings.embedding_dimension)), limit)
 
 
 def _answer_generator():
@@ -316,7 +324,7 @@ def _answer_question(crawl_id: str, question: str) -> dict[str, object]:
 def _reindex_knowledge(crawl_id: str) -> int:
     stored_pages = database.get_pages(crawl_id)
     chunks = extract_pages_knowledge(stored_pages, crawl_id)
-    database.replace_knowledge_chunks(crawl_id, chunks, _embedding_provider())
+    database.replace_knowledge_chunks(crawl_id, chunks, _embedding_provider(settings.embedding_provider, settings.embedding_model, settings.embedding_dimension))
     return len(chunks)
 
 

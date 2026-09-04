@@ -18,6 +18,18 @@ def test_hash_provider_is_the_offline_default() -> None:
     assert provider.dimension == 16
 
 
+def test_real_semantic_provider_separates_paraphrase_from_unrelated_text() -> None:
+    try:
+        provider = build_embedding_provider("sentence-transformers")
+    except (ImportError, RuntimeError, OSError) as exc:
+        pytest.skip(f"semantic model unavailable in this environment: {exc}")
+    query = provider.embed("How can I get my money back?")
+    paraphrase = provider.embed("What is the refund process?")
+    unrelated = provider.embed("The office is closed on public holidays.")
+    from app.embeddings import cosine_similarity
+    assert cosine_similarity(query, paraphrase) > cosine_similarity(query, unrelated)
+
+
 def test_unknown_embedding_provider_is_rejected() -> None:
     with pytest.raises(ValueError, match="Unknown embedding provider"):
         build_embedding_provider("unknown")

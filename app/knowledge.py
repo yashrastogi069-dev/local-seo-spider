@@ -50,20 +50,33 @@ def _blocks_from_html(html: str) -> list[tuple[str, str]]:
     return blocks
 
 
-def _split_text(text: str, max_chars: int = 1400) -> Iterable[str]:
+def _split_text(text: str, max_chars: int = 1400, overlap_chars: int = 180) -> Iterable[str]:
     words = text.split()
     current: list[str] = []
     length = 0
+    previous = ""
     for word in words:
         extra = len(word) + (1 if current else 0)
         if current and length + extra > max_chars:
-            yield " ".join(current)
-            current = []
-            length = 0
+            chunk = " ".join(current).strip()
+            if chunk and chunk != previous:
+                yield chunk
+            overlap: list[str] = []
+            overlap_len = 0
+            for prior in reversed(current):
+                if overlap_len + len(prior) + 1 > overlap_chars:
+                    break
+                overlap.insert(0, prior)
+                overlap_len += len(prior) + 1
+            current = overlap
+            length = len(" ".join(current))
+            previous = chunk
         current.append(word)
         length += extra
     if current:
-        yield " ".join(current)
+        chunk = " ".join(current).strip()
+        if chunk and chunk != previous:
+            yield chunk
 
 
 def extract_knowledge_chunks(page: dict[str, Any], crawl_id: str, max_chars: int = 1400) -> list[KnowledgeChunk]:

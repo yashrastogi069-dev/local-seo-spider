@@ -63,6 +63,10 @@ def test_hybrid_retrieval_persists_vectors_and_keeps_answer_grounded(tmp_path: P
     assert matches
     assert matches[0]["retrieval_mode"] == "hybrid"
     assert matches[0]["url"] == "https://owned.example/services"
+    assert "semantic_score" in matches[0]
+    assert "lexical_match" in matches[0]
+    assert "term_coverage" in matches[0]
+    assert "hybrid_score" in matches[0]
     unknown = answer_question(crawl_id, "What is the moon made of?", database.search_hybrid_knowledge)
     assert unknown["grounded"] is False
     assert unknown["citations"] == []

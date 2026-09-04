@@ -17,6 +17,6 @@ if [ ! -f .env ]; then
 fi
 
 .venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -e ".[dev]"
+.venv/bin/python -m pip install -e ".[dev,semantic]"
 .venv/bin/playwright install chromium
 exec .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port "${PORT:-3000}"

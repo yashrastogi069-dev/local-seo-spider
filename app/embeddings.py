@@ -50,8 +50,10 @@ class SentenceTransformersProvider:
         except ImportError as exc:
             raise RuntimeError("Sentence Transformers is not installed. Use SPIDER_EMBEDDING_PROVIDER=hash or install the optional semantic extra.") from exc
         self.model_name = model_name
+        self.name = f"sentence-transformers:{model_name}"
         self._model = SentenceTransformer(model_name)
-        self.dimension = int(self._model.get_sentence_embedding_dimension())
+        dimension_getter = getattr(self._model, "get_embedding_dimension", self._model.get_sentence_embedding_dimension)
+        self.dimension = int(dimension_getter())
 
     def embed(self, text: str) -> list[float]:
         values = self._model.encode(text, normalize_embeddings=True, show_progress_bar=False)
