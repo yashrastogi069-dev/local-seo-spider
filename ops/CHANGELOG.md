@@ -32,6 +32,32 @@ All notable changes, phase executions, and architectural transitions for Local S
 
 ---
 
+## [Phase 2: Crawler Core — Baseline Forensic Kickoff] - 2026-09-05
+
+### Forensic Audit & Architecture Map
+- Conducted deep line-by-line forensic reconstruction of the entire crawler codebase (`app/crawler.py`, `app/urltools.py`, `app/main.py`, `app/parser.py`, `app/database.py`).
+- Produced end-to-end architecture execution graph tracing requests from UI/API through engine selection, queueing, fetch, rendering, link discovery, deduplication, and persistence.
+- Created `reports/phase-2/phase_2_baseline_forensic_audit.md`.
+- Tagged Git commit `db7fc50` as `pre-phase-2-crawler-core`.
+- Defined formal requirements `REQ-CRAWL-001` through `REQ-CRAWL-016` in `docs/REQUIREMENTS_TRACEABILITY.md`.
+
+### Critical Baseline Findings & Defects Cataloged
+- **P0-01**: `process` mode does not fetch concurrently in worker processes; executes sequential I/O in main thread.
+- **P0-02**: `thread`, `async`, and `process` modes silently ignore `render_enabled=True`.
+- **P0-03**: `test_crawl_engine_playwright_rendering` test is fake (never calls `CrawlEngine.run()`).
+- **P1-01**: Permanent depth and parent provenance amnesia (`depth=0`, `parent_url=""` on all pages).
+- **P1-02**: All-or-nothing in-memory persistence; mid-crawl failure drops all fetched pages.
+- **P1-03**: In-flight crawl pause and cancellation are unsupported by API and worker loop.
+- **P1-04**: Silent fallback on browser launch failure.
+- **P1-05**: Frontier halts URL discovery prematurely based on `len(queued)` rather than crawled pages.
+- **P1-06**: Redirect target URLs not tracked in `queued`, causing duplicate fetches.
+- **P2-01**: Zero HTTP connection pooling in `thread`, `async`, and `process` modes (client churn).
+- **P2-02**: Async event loop and client recreated per batch.
+- **P2-03**: Global lock serializes thread delay across all workers.
+- **P2-04**: Pre-connection DNS resolution missing in SSRF validator (DNS rebinding vulnerability).
+
+---
+
 ## [Phase 1: Evaluation Integrity] - 2026-09-05
 
 ### Added

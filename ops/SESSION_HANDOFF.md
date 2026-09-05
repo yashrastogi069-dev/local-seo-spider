@@ -16,28 +16,31 @@ All 125 automated tests pass (123 passed, 2 skipped solely due to the optional `
 ---
 
 ## 2. Active Phase Status
-- **Active Phase**: PHASE 1 COMPLETE / CERTIFIED CLOSED.
-- **Active Subphase**: Phase 1 Release Gate Formally PASSED.
-- **Next Phase In Line**: PHASE 2 (Crawler Core) — Unlocked, awaiting user command to commence.
+- **Active Phase**: PHASE 2 (Crawler Core) — FORENSIC KICKOFF COMPLETED.
+- **Active Subphase**: Phase 2 Baseline Forensic Audit complete (No major implementation yet).
+- **Next Subphase In Line**: PHASE 2A (Engine Architecture & Contract Unification).
 
 ---
 
 ## 3. Work Completed in Current Cycle
-1. **Mathematical Invariant Rectification**:
-   - Created `app/evaluation.py` implementing unclipped standard formulations for Recall@K, Precision@K, MRR, NDCG@K, Brier score, and ECE.
-   - Fixed `app/database.py` crawl coverage denominator by taking the exact set union of crawled URLs and discovered links.
-2. **Decoupled Answer Planning & Zero Contamination**:
-   - Discovered and eliminated hardcoded special case in `app/qa.py` (lines 1496-1508) in favor of dynamic sentence extraction.
-   - Verified zero benchmark contamination across all 23 production modules in `app/`.
-   - Codified contamination resistance into `tests/test_contamination.py` (3/3 passed).
-3. **Population Accounting Reconciliation**:
-   - Reconciled benchmark population accounting: Total 155 queries = 125 answerable + 30 unanswerable; 140 retrieval-scored + 15 near-miss overlap.
-   - Fixed 2 cross-split query leakages (`DEV-02` vs `JSON-03`, `NUM-10` vs `TEMP-01`).
-   - Created `tests/test_benchmark_accounting.py` (2/2 passed).
-4. **Comprehensive Phase 1 Reports Produced**:
-   - Generated all 13 Phase 1 report artifacts in `reports/phase-1/` including canonical case results (`case_evaluation_results.json`), calibration, ablation, adversarial, citation, contamination, and the formal sign-off document (`phase_1_certification.md`).
-5. **Release Gate Status**:
-   - Phase 1 release gate is formally PASSED. Phase 2 (Crawler Core) is unlocked.
+1. **Phase 2 Forensic Kickoff Executed**:
+   - Deep forensic reconstruction performed across all 4 crawler engines (`serial`, `thread`, `async`, `process`) and fetch strategies (`static`, `browser`).
+   - Cataloged critical architectural defects:
+     - `process` mode is pseudo-concurrent (sequential I/O in main thread).
+     - Concurrent modes silently bypass `render_enabled=True`.
+     - Fake Playwright test identified (`test_crawl_engine_playwright_rendering` bypassed `CrawlEngine.run()`).
+     - Permanent depth/parent amnesia (`depth=0`, `parent_url=""` on all pages).
+     - All-or-nothing in-memory persistence (loss on mid-crawl crash).
+     - No in-flight cancellation or pause support.
+     - HTTP client and event loop churn.
+     - DNS rebinding SSRF gap.
+2. **Phase 2 Requirements Defined**:
+   - Codified `REQ-CRAWL-001` through `REQ-CRAWL-016` in `docs/REQUIREMENTS_TRACEABILITY.md`.
+3. **Comprehensive Forensic Report Generated**:
+   - Created `reports/phase-2/phase_2_baseline_forensic_audit.md`.
+4. **Memory Files & Git Checkpoint Synchronized**:
+   - Tagged Git commit `db7fc50` as `pre-phase-2-crawler-core`.
+   - Updated `ops/STATE.md`, `ops/KNOWN_ISSUES.md`, `ops/CHANGELOG.md`, `docs/REQUIREMENTS_TRACEABILITY.md`.
 
 ---
 
