@@ -14,9 +14,9 @@ class UrlValidationError(ValueError):
 
 _TRACKING_PARAMS = {
     "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
-    "fbclid", "gclid", "msclkid", "mc_eid", "ref", "source", "session_id",
+    "fbclid", "gclid", "msclkid", "mc_eid", "ref", "session_id",
     "sid", "spm", "_ga", "_gl", "trk", "yclid", "jsessionid", "phpsessid",
-    "aspsessionid", "csrf_token", "state", "__hsfp", "__hssc", "__hstc",
+    "aspsessionid", "csrf_token", "__hsfp", "__hssc", "__hstc",
 }
 
 _SENSITIVE_PARAM_NAMES = {
@@ -158,19 +158,111 @@ def redact_sensitive_url(url: str) -> str:
         return url
 
 
-def _normalize_path_percent_encoding(path: str) -> str:
-    """Decode unreserved percent-encoded characters (RFC 3986) in path."""
+from dataclasses import dataclass
+
+_UNRESERVED_BYTES = set(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~")
+
+
+@dataclass(frozen=True)
+class UrlNormalizationPolicy:
+    """Policy for URL canonicalization and normalization preserving resource identity."""
+
+    strip_fragment: bool = True
+    normalize_case: bool = True
+    remove_default_port: bool = True
+    resolve_dot_segments: bool = True
+    normalize_percent_encoding: bool = True
+    collapse_path_slashes: bool = True
+    sort_query_params: bool = True
+    dedup_query_params: bool = True
+    strip_tracking_params: bool = True
+    redact_sensitive_params: bool = False
+    trailing_slash: str = "strip"  # "preserve", "strip", "append"
+
+
+def remove_dot_segments(path: str) -> str:
+    """RFC 3986 Section 5.2.4: Remove dot segments from path while preserving leading/trailing slashes."""
+    if not path or path == "/":
+        return "/"
+    is_absolute = path.startswith("/")
+    # Path indicates directory if ending in slash or dot-segments
+    ends_with_dir = path.endswith("/") or path.endswith("/.") or path.endswith("/..")
+
+    segments = path.split("/")
+    output: list[str] = []
+    for segment in segments:
+        if segment == "" or segment == ".":
+            continue
+        elif segment == "..":
+            if output:
+                output.pop()
+        else:
+            output.append(segment)
+
+    result = ("/" if is_absolute else "") + "/".join(output)
+    if not result:
+        return "/"
+    if ends_with_dir and not result.endswith("/"):
+        result += "/"
+    return result
+
+
+def normalize_percent_encoding(text: str) -> str:
+    """Decode unreserved percent-encoded characters and uppercase hex digits in reserved sequences (RFC 3986)."""
     def repl(m: re.Match[str]) -> str:
-        code = int(m.group(1), 16)
-        ch = chr(code)
-        if ch.isalnum() or ch in "-_.~":
-            return ch
-        return m.group(0).upper()
-    return re.sub(r"%([0-9a-fA-F]{2})", repl, path)
+        hex_digits = m.group(1)
+        byte_val = int(hex_digits, 16)
+        if byte_val in _UNRESERVED_BYTES:
+            return chr(byte_val)
+        return f"%{hex_digits.upper()}"
+    return re.sub(r"%([0-9a-fA-F]{2})", repl, text)
 
 
-def normalize_url(value: str, base_url: str | None = None, allow_private: bool = False) -> str:
+def normalize_query_string(
+    query: str,
+    strip_tracking: bool = True,
+    redact_sensitive: bool = True,
+    sort_params: bool = True,
+    dedup_params: bool = True,
+) -> str:
+    """Normalize query string: strip tracking, redact sensitive, dedup identical pairs, and sort deterministically."""
+    if not query:
+        return ""
+    pairs = parse_qsl(query, keep_blank_values=True)
+    seen_pairs: set[tuple[str, str]] = set()
+    cleaned_pairs: list[tuple[str, str]] = []
+
+    for k, v in pairs:
+        k_clean = k.strip()
+        if not k_clean:
+            continue
+        k_lower = k_clean.lower()
+        if strip_tracking and k_lower in _TRACKING_PARAMS:
+            continue
+        val = "[REDACTED]" if (redact_sensitive and k_lower in _SENSITIVE_PARAM_NAMES) else v
+        pair = (k_clean, val)
+        if dedup_params:
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+        cleaned_pairs.append(pair)
+
+    if sort_params:
+        cleaned_pairs.sort(key=lambda item: (item[0], item[1]))
+
+    return urlencode(cleaned_pairs, safe="[]")
+
+
+def normalize_url(
+    value: str,
+    base_url: str | None = None,
+    allow_private: bool = False,
+    policy: UrlNormalizationPolicy | None = None,
+) -> str:
     """Canonicalize a URL: strip fragments, normalize host/port, sort query params, strip tracking, redact secrets."""
+    if policy is None:
+        policy = UrlNormalizationPolicy()
+
     candidate = urljoin(base_url, value) if base_url else value
     parsed = urlsplit(candidate.strip())
     if parsed.scheme.lower() not in {"http", "https"}:
@@ -182,55 +274,84 @@ def normalize_url(value: str, base_url: str | None = None, allow_private: bool =
 
     validate_hostname_ssrf(parsed.hostname, allow_private=allow_private)
     hostname_lower = parsed.hostname.lower().rstrip(".").strip("[]")
+    is_ipv6 = ":" in hostname_lower
+    formatted_host = f"[{hostname_lower}]" if is_ipv6 else hostname_lower
 
     port = parsed.port
-    netloc = hostname_lower
-    if port and not ((parsed.scheme == "http" and port == 80) or (parsed.scheme == "https" and port == 443)):
-        netloc = f"{hostname_lower}:{port}"
-    
+    netloc = formatted_host
+    if port:
+        if policy.remove_default_port and (
+            (parsed.scheme.lower() == "http" and port == 80)
+            or (parsed.scheme.lower() == "https" and port == 443)
+        ):
+            netloc = formatted_host
+        else:
+            netloc = f"{formatted_host}:{port}"
+
     path = parsed.path or "/"
-    path = _normalize_path_percent_encoding(path)
-    # Clean duplicate slashes in path
-    path = re.sub(r"/+", "/", path)
-    if len(path) > 1 and path.endswith("/"):
-        path = path.rstrip("/")
-    
+    if policy.resolve_dot_segments:
+        path = remove_dot_segments(path)
+    if policy.normalize_percent_encoding:
+        path = normalize_percent_encoding(path)
+    if policy.collapse_path_slashes:
+        path = re.sub(r"/+", "/", path)
+
+    if policy.trailing_slash == "strip":
+        if len(path) > 1 and path.endswith("/"):
+            path = path.rstrip("/")
+    elif policy.trailing_slash == "append":
+        if not path.endswith("/"):
+            path = path + "/"
+    # "preserve": do not modify trailing slash
+
     query = ""
     if parsed.query:
-        pairs = parse_qsl(parsed.query, keep_blank_values=True)
-        filtered_pairs = []
-        for k, v in pairs:
-            k_clean = k.strip()
-            if not k_clean:
-                continue
-            if k_clean.lower() in _TRACKING_PARAMS:
-                continue
-            if k_clean.lower() in _SENSITIVE_PARAM_NAMES:
-                filtered_pairs.append((k_clean, "[REDACTED]"))
-            else:
-                filtered_pairs.append((k_clean, v))
-        # Sort query parameters deterministically by key and value
-        filtered_pairs.sort(key=lambda item: (item[0], item[1]))
-        query = urlencode(filtered_pairs)
-    
-    return urlunsplit((parsed.scheme.lower(), netloc, path, query, ""))
+        query = normalize_query_string(
+            parsed.query,
+            strip_tracking=policy.strip_tracking_params,
+            redact_sensitive=policy.redact_sensitive_params,
+            sort_params=policy.sort_query_params,
+            dedup_params=policy.dedup_query_params,
+        )
+
+    fragment = "" if policy.strip_fragment else parsed.fragment
+    scheme = parsed.scheme.lower() if policy.normalize_case else parsed.scheme
+
+    return urlunsplit((scheme, netloc, path, query, fragment))
 
 
 canonicalize_url = normalize_url
 
 
-def resolve_canonical_url(declared_canonical: str, page_url: str) -> str:
+def resolve_canonical_url(
+    declared_canonical: str,
+    page_url: str,
+    allow_private: bool = False,
+    policy: UrlNormalizationPolicy | None = None,
+) -> str:
     """Resolve and normalize a declared canonical URL link against the page URL."""
     if not declared_canonical or not declared_canonical.strip():
         return page_url
     try:
-        resolved = normalize_url(declared_canonical.strip(), page_url)
+        resolved = normalize_url(declared_canonical.strip(), page_url, allow_private=allow_private, policy=policy)
         # Ensure it belongs to the same host
         if is_same_host(resolved, page_url):
             return resolved
         return page_url
     except UrlValidationError:
         return page_url
+
+
+def resolve_redirect_url(
+    location: str,
+    current_url: str,
+    allow_private: bool = False,
+    policy: UrlNormalizationPolicy | None = None,
+) -> str:
+    """Resolve a redirect Location header relative to the current requesting URL."""
+    if not location or not location.strip():
+        raise UrlValidationError("Empty redirect location.")
+    return normalize_url(location.strip(), base_url=current_url, allow_private=allow_private, policy=policy)
 
 
 def detect_api_pagination(url: str) -> tuple[bool, str, int]:
@@ -252,10 +373,22 @@ def detect_api_pagination(url: str) -> tuple[bool, str, int]:
     return False, parsed.path, 0
 
 
+def _effective_port(parsed) -> int:
+    if parsed.port:
+        return parsed.port
+    return 443 if parsed.scheme.lower() == "https" else 80
+
+
 def is_same_host(url: str, seed_url: str) -> bool:
     candidate = urlsplit(url)
     seed = urlsplit(seed_url)
-    return candidate.hostname == seed.hostname and candidate.port == seed.port and candidate.scheme == seed.scheme
+    cand_host = (candidate.hostname or "").lower().rstrip(".")
+    seed_host = (seed.hostname or "").lower().rstrip(".")
+    return (
+        cand_host == seed_host
+        and _effective_port(candidate) == _effective_port(seed)
+        and candidate.scheme.lower() == seed.scheme.lower()
+    )
 
 
 def safe_filename(value: str, fallback: str = "export") -> str:

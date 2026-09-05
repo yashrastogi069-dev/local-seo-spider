@@ -40,6 +40,7 @@ class Settings:
     async_concurrency: int = 8
     thread_workers: int = 4
     process_workers: int = 2
+    allow_private_crawls: bool = False
 
     @property
     def database_path(self) -> Path:
@@ -82,4 +83,5 @@ class Settings:
             async_concurrency=max(1, min(32, int(os.getenv("SPIDER_ASYNC_CONCURRENCY", "8")))),
             thread_workers=max(1, min(16, int(os.getenv("SPIDER_THREAD_WORKERS", "4")))),
             process_workers=max(1, min(8, int(os.getenv("SPIDER_PROCESS_WORKERS", "2")))),
+            allow_private_crawls=_as_bool(os.getenv("SPIDER_ALLOW_PRIVATE_CRAWLS", "false")),
         )

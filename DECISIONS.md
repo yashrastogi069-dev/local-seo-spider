@@ -101,3 +101,27 @@ This document records the architectural and engineering decisions made for the L
   5. Implement `FrontierItem` with explicit `__hash__` and `__eq__` for set-based deduplication and queue operations.
   6. Extend `PageRecord` with provenance fields (`normalized_url`, `depth`, `parent_url`, `fetch_strategy`, `crawler_engine`, `response_bytes`, `duration_ms`, `error_category`, `headers`), and persist all fields in SQLite with automatic schema migration.
 - **Consequences**: Legacy callers continue to function without breaking changes, while modern engines and inspectors gain complete forensic observability and multiprocessing compatibility.
+
+---
+
+## ADR-010: Conservative URL Normalization and Finite State Machine Frontier Lifecycle
+- **Status**: ACCEPTED / VERIFIED
+- **Context**: Prior to Phase 2B, URL normalization was ad-hoc and inconsistent across crawler call sites, prone to path explosion (e.g. `//`, `/./`, `/../`), non-deterministic query string permutations, and SSRF vulnerabilities. Additionally, crawl scheduling relied on simple deques without lifecycle tracking, resulting in vulnerability to redirect loops, double-fetching of redirect destinations, and unmonitored dropouts.
+- **Decision**:
+  1. Implement RFC 3986 compliant URL normalization in [`app/urltools.py`](file:///C:/Users/win/10/Desktop/local-seo-spider/app/urltools.py):
+     - Normalized scheme and host casing; default port stripping (80 for HTTP, 443 for HTTPS) while preserving custom ports and IPv6 brackets.
+     - Strict SSRF validation with decimal, octal, hex, dword, and IPv6 parsing blocking loopback, link-local, and cloud metadata addresses unless explicitly permitted.
+     - RFC 3986 Section 5.2.4 dot segment removal (`remove_dot_segments`) and consecutive slash collapsing.
+     - Percent-encoding canonicalization (`normalize_percent_encoding`): unreserved characters decoded, reserved characters uppercase-escaped.
+     - Deterministic query string sorting and duplicate parameter elimination (`normalize_query_string`), while stripping marketing trackers (`utm_*`, `fbclid`, etc.).
+     - Sensitive parameter redaction (`token`, `api_key`, `secret`) made opt-in (`redact_sensitive_params=False` by default) to prevent corruption of crawler HTTP dispatch, reserved for reporting and export.
+     - Trailing slash policy configurable via `UrlNormalizationPolicy` (default `"strip"`, but using `"preserve"` for redirect `Location` header resolution to prevent redirect loops).
+  2. Implement strict finite state machine crawler frontier in [`app/frontier.py`](file:///C:/Users/win/10/Desktop/local-seo-spider/app/frontier.py):
+     - 8 explicit states: `DISCOVERED`, `QUEUED`, `FETCHING`, `COMPLETED`, `FAILED_RETRYABLE`, `FAILED_FINAL`, `SKIPPED`, `DUPLICATE`.
+     - Validated state transitions enforcing unidirectional flow and rejecting impossible transitions with `InvalidStateTransitionError`.
+     - Idempotent terminal state handlers ensuring idempotent completions and preventing race conditions or worker leaks.
+     - Redirect handling with alias mapping and `enqueue_target=False` support for engines that follow HTTP redirects internally.
+     - Cross-domain filtering and canonical tag deduplication (`handle_canonical`).
+     - Mathematical frontier accounting reconciliation (`reconcile_accounting`) ensuring zero lost or untracked URLs.
+- **Consequences**: Eliminates crawl loops, prevents redundant fetches, ensures exact depth hierarchy and page budget bounding, and provides thread-safe lifecycle tracking across all execution modes.
+

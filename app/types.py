@@ -98,6 +98,93 @@ class FrontierItem:
         return asdict(self)
 
 
+class FrontierState(str, Enum):
+    """Lifecycle states for URLs managed in the crawl frontier."""
+
+    DISCOVERED = "discovered"
+    QUEUED = "queued"
+    FETCHING = "fetching"
+    COMPLETED = "completed"
+    FAILED_RETRYABLE = "failed_retryable"
+    FAILED_FINAL = "failed_final"
+    SKIPPED = "skipped"
+    DUPLICATE = "duplicate"
+
+
+class InvalidStateTransitionError(ValueError):
+    """Raised when an invalid frontier state transition is attempted."""
+
+
+VALID_FRONTIER_TRANSITIONS: dict[FrontierState, set[FrontierState]] = {
+    FrontierState.DISCOVERED: {
+        FrontierState.QUEUED,
+        FrontierState.SKIPPED,
+        FrontierState.DUPLICATE,
+    },
+    FrontierState.QUEUED: {
+        FrontierState.FETCHING,
+        FrontierState.SKIPPED,
+    },
+    FrontierState.FETCHING: {
+        FrontierState.COMPLETED,
+        FrontierState.FAILED_RETRYABLE,
+        FrontierState.FAILED_FINAL,
+        FrontierState.SKIPPED,
+        FrontierState.DUPLICATE,
+    },
+    FrontierState.FAILED_RETRYABLE: {
+        FrontierState.QUEUED,
+        FrontierState.FAILED_FINAL,
+        FrontierState.SKIPPED,
+    },
+    FrontierState.COMPLETED: set(),
+    FrontierState.FAILED_FINAL: set(),
+    FrontierState.SKIPPED: set(),
+    FrontierState.DUPLICATE: set(),
+}
+
+
+def validate_frontier_transition(from_state: FrontierState, to_state: FrontierState) -> None:
+    """Validate that a transition between two frontier states is strictly permitted."""
+    allowed = VALID_FRONTIER_TRANSITIONS.get(from_state, set())
+    if to_state not in allowed:
+        raise InvalidStateTransitionError(
+            f"Invalid frontier transition from {from_state.value} to {to_state.value}"
+        )
+
+
+@dataclass
+class FrontierEntry:
+    """Mutable tracking record for a URL in the crawl frontier state machine."""
+
+    url: str
+    depth: int = 0
+    parent_url: str = ""
+    state: FrontierState = FrontierState.DISCOVERED
+    discovered_at: str = ""
+    retry_count: int = 0
+    max_retries: int = 3
+    next_eligible_time: float = 0.0
+    error: str = ""
+    skip_reason: str = ""
+    duplicate_of: str = ""
+    status_code: int | None = None
+
+    def transition_to(self, new_state: FrontierState) -> None:
+        """Apply a validated state transition."""
+        validate_frontier_transition(self.state, new_state)
+        self.state = new_state
+
+    def to_item(self) -> FrontierItem:
+        return FrontierItem(
+            url=self.url,
+            depth=self.depth,
+            parent_url=self.parent_url,
+            discovered_at=self.discovered_at,
+            retry_count=self.retry_count,
+        )
+
+
 @dataclass
 class LinkRecord:
     source_url: str
@@ -274,6 +361,7 @@ class CrawlRequest:
     extraction_profile_path: str = ""
     follow_api_entry_points: bool = False
     crawl_id: str = ""
+    max_depth: int = 10
 
     def public_settings(self) -> dict[str, Any]:
         return {
@@ -286,6 +374,7 @@ class CrawlRequest:
             "extraction_profile": bool(self.extraction_profile_path),
             "follow_api_entry_points": self.follow_api_entry_points,
             "crawl_id": self.crawl_id,
+            "max_depth": self.max_depth,
         }
 
     def storage_payload(self) -> dict[str, Any]:
@@ -306,6 +395,7 @@ class CrawlRequest:
             extraction_profile_path=str(payload.get("extraction_profile_path", "")),
             follow_api_entry_points=bool(payload.get("follow_api_entry_points", False)),
             crawl_id=str(payload.get("crawl_id", "")),
+            max_depth=int(payload.get("max_depth", 10)),
         )
 
 

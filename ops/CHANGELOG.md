@@ -4,23 +4,60 @@ All notable changes, phase executions, and architectural transitions for Local S
 
 ---
 
-## Current Status: Phase 0 & 1 Complete, Subphase 2A Complete / Transitioning to Subphase 2B
+## Current Status: Phase 0 & 1 Complete, Subphase 2A & 2B Complete / Transitioning to Subphase 2C
 
 ### Current Phase State:
 - **PHASE 0 (Baseline & Forensic Audit)**: COMPLETED / PASSED
 - **PHASE 1 (Evaluation Integrity)**: COMPLETED / PASSED
 - **PHASE 2 (Crawler Core)**: ACTIVE
   - **Subphase 2A (Contracts & State Model)**: COMPLETED / PASSED
-  - **Subphase 2B (Engine Independence & Browser)**: NEXT IN LINE
-  - **Subphase 2C (Concurrency Engines)**: PENDING
-  - **Subphase 2D (Frontier & Persistence)**: PENDING
-  - **Subphase 2E (Security & Hardening)**: PENDING
+  - **Subphase 2B (URL Normalization + Frontier + Crawl Lifecycle)**: COMPLETED / PASSED
+  - **Subphase 2C (Serial + Threaded Engine Hardening & Politeness)**: NEXT IN LINE
+  - **Subphase 2D (Frontier Persistence & Concurrency)**: PENDING
+  - **Subphase 2E (Security & Live Web Soak)**: PENDING
 - **PHASE 3 (Universal Extraction)**: PENDING
 - **PHASE 4 (Knowledge/Indexing/Search)**: PENDING
 - **PHASE 5 (RAG Intelligence)**: PENDING
 - **PHASE 6 (Web Intelligence)**: PENDING
 - **PHASE 7 (UI/UX)**: PENDING
 - **PHASE 8 (Final Certification)**: PENDING
+
+---
+
+## [Phase 2B: URL Normalization + Frontier + Crawl Lifecycle] - 2026-09-05
+
+### Added
+- Created `app/frontier.py` implementing strict finite state machine crawler frontier `CrawlFrontier`:
+  - 8 lifecycle states (`DISCOVERED`, `QUEUED`, `FETCHING`, `COMPLETED`, `FAILED_RETRYABLE`, `FAILED_FINAL`, `SKIPPED`, `DUPLICATE`).
+  - State transition validation (`validate_frontier_transition`) rejecting illegal transitions with `InvalidStateTransitionError`.
+  - Idempotent terminal state handlers (`mark_completed`, `mark_failed`, `mark_skipped`, `mark_duplicate`) preventing double-transition crashes and worker leaks.
+  - Redirect handling (`handle_redirect`) with alias mapping and `enqueue_target=False` support for engines that resolve redirects internally.
+  - Canonical tag deduplication (`handle_canonical`) with domain filtering.
+  - Mathematical accounting reconciliation (`reconcile_accounting`) ensuring exact URL conservation.
+- Created `app/urltools.py` normalization functions and policy:
+  - `remove_dot_segments()` implementing RFC 3986 Section 5.2.4 path normalization.
+  - `normalize_percent_encoding()`: unreserved bytes decoded, reserved characters uppercase-escaped.
+  - `normalize_query_string()`: alphabetical key/value sorting, deduplication, marketing tracker stripping.
+  - `UrlNormalizationPolicy`: configurable policy defaulting to trailing slash stripping, tracker stripping, and retaining sensitive credentials by default during HTTP dispatch.
+  - `_PRESERVE_SLASH_POLICY`: trailing slash preservation for redirect `Location` header resolution.
+- Created `tests/controlled_crawler_server.py`: deterministic test website fixture with 19 endpoints.
+- Created 3 comprehensive verification test suites:
+  - `tests/test_url_normalization.py` (13 tests): RFC 3986 invariants, port normalization, percent encoding, query sorting, tracking strip, sensitive param retention, canonical & redirect resolution.
+  - `tests/test_frontier_lifecycle.py` (11 tests): 8-state FSM transitions, illegal transition rejection, idempotent terminal states, retry pool backoff, accounting reconciliation.
+  - `tests/test_controlled_crawler.py` (12 tests): circular links, A-B-A cycle bounding, fragment deduplication, canonical duplicates, depth hierarchy, page limit enforcement, redirect chains/loops, HTTP errors, 429 rate-limiting retries.
+
+### Changed
+- Integrated `CrawlFrontier` into `CrawlEngine.run()` and `_run_static_mode()` in `app/crawler.py`.
+- Resolved redirect `Location` headers using `_PRESERVE_SLASH_POLICY` to prevent redirect loops.
+- Avoided duplicate fetching of redirect targets by passing `enqueue_target=False` to `frontier.handle_redirect`.
+- Handled BeautifulSoup `rel` attribute representations (string and list) in `app/parser.py` for canonical tags.
+- Recorded ADR-010 in `DECISIONS.md`.
+
+### Verified
+- 52/52 tests passed across targeted suites (13 normalization, 11 frontier, 12 controlled crawler, 16 contracts).
+- 182 passed, 2 skipped, 0 failed across full repository regression suite.
+- Fresh-eyes subagent architecture review completed ("Crawler Specialist"); all findings resolved.
+- Subphase 2B release gate PASSED.
 
 ---
 

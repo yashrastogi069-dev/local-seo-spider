@@ -88,9 +88,9 @@ Local SEO Spider combines a high-concurrency web crawler with an evidence-ground
 - **Resilience**: Exponential backoff on HTTP 429 and 5xx errors; configurable crawl depth, delay, and URL limits.
 - **SSRF Defense**: Outbound connection pre-validation rejecting private/internal networks and cloud metadata in all IP representations.
 
-### B. URL Normalization & Deduplication (`app/urltools.py`)
-- **Canonicalization**: Strips tracking parameters (`utm_*`, `fbclid`, `gclid`), normalizes schemes/ports, deduplicates redundant path slashes (`//` -> `/`), strips URL fragments, sorts query parameters.
-- **Deduplication**: Resolves `<link rel="canonical">` tags, relative canonical references, and hashes raw content for near-duplicate identification.
+### B. URL Normalization & Crawl Frontier (`app/urltools.py`, `app/frontier.py`)
+- **URL Normalization Policy**: RFC 3986 compliance, scheme and host lowercasing, default port removal (80/443), IPv6 bracket preserving, dot segment removal (`remove_dot_segments` via RFC 3986 Section 5.2.4), percent-encoding canonicalization (`normalize_percent_encoding`), deterministic query sorting and deduplication, marketing tracker stripping. Trailing slashes stripped by default, but preserved during redirect `Location` header resolution. Sensitive credentials retained during HTTP dispatch and redacted only upon reporting/export.
+- **Finite State Machine Frontier (`CrawlFrontier`)**: Explicit 8-state model (`DISCOVERED`, `QUEUED`, `FETCHING`, `COMPLETED`, `FAILED_RETRYABLE`, `FAILED_FINAL`, `SKIPPED`, `DUPLICATE`) with transition validation, terminal state idempotency, exponential backoff retry pool, redirect alias mapping, canonical tag deduplication, and mathematical accounting reconciliation.
 
 ### C. Universal Document Extractor (`app/documents.py`)
 - **Formats**: HTML (BeautifulSoup), JSON, Markdown, and PDF.

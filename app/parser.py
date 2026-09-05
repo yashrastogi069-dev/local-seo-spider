@@ -47,7 +47,7 @@ def parse_structured_data(soup: BeautifulSoup) -> list[dict[str, Any]]:
     return extracted
 
 
-def extract_links(html: str, page_url: str, seed_url: str) -> list[LinkRecord]:
+def extract_links(html: str, page_url: str, seed_url: str, allow_private: bool = False) -> list[LinkRecord]:
     soup = BeautifulSoup(html, "html.parser")
     records: list[LinkRecord] = []
     for anchor in soup.find_all("a", href=True):
@@ -55,7 +55,7 @@ def extract_links(html: str, page_url: str, seed_url: str) -> list[LinkRecord]:
         if not raw_href or raw_href.startswith(("mailto:", "tel:", "javascript:", "data:")):
             continue
         try:
-            target = normalize_url(raw_href, page_url)
+            target = normalize_url(raw_href, page_url, allow_private=allow_private)
         except UrlValidationError:
             continue
         rel_values = [str(item).lower() for item in (anchor.get("rel") or [])]
@@ -74,7 +74,7 @@ def extract_links(html: str, page_url: str, seed_url: str) -> list[LinkRecord]:
     return records
 
 
-def extract_api_entry_points(html: str, page_url: str, seed_url: str) -> list[dict[str, Any]]:
+def extract_api_entry_points(html: str, page_url: str, seed_url: str, allow_private: bool = False) -> list[dict[str, Any]]:
     """Record explicit API-like references for review; never fetch or submit them automatically."""
     soup = BeautifulSoup(html or "", "html.parser")
     candidates: list[tuple[str, str, str]] = []
@@ -94,7 +94,7 @@ def extract_api_entry_points(html: str, page_url: str, seed_url: str) -> list[di
         if not raw or raw.startswith(("data:", "javascript:", "mailto:", "tel:")):
             continue
         try:
-            target = normalize_url(raw, page_url)
+            target = normalize_url(raw, page_url, allow_private=allow_private)
         except UrlValidationError:
             continue
         key = (target, kind)
@@ -105,18 +105,27 @@ def extract_api_entry_points(html: str, page_url: str, seed_url: str) -> list[di
     return results[:100]
 
 
-def extract_page_signals(html: str, page_url: str, seed_url: str) -> dict[str, Any]:
+def extract_page_signals(html: str, page_url: str, seed_url: str, allow_private: bool = False) -> dict[str, Any]:
     soup = BeautifulSoup(html or "", "html.parser")
     title = normalized_text(soup.title.get_text(" ", strip=True)) if soup.title else ""
     description_tag = soup.find("meta", attrs={"name": re.compile(r"^description$", re.I)})
     description = normalized_text(str(description_tag.get("content", ""))) if description_tag else ""
     robots_tag = soup.find("meta", attrs={"name": re.compile(r"^robots$", re.I)})
     meta_robots = normalized_text(str(robots_tag.get("content", ""))).lower() if robots_tag else ""
-    canonical_tag = soup.find("link", attrs={"rel": lambda values: values and "canonical" in [str(v).lower() for v in values]})
     canonical = ""
+    canonical_tag = soup.find(
+        "link",
+        attrs={
+            "rel": lambda v: any(str(x).lower().strip() == "canonical" for x in v)
+            if isinstance(v, (list, tuple))
+            else str(v).lower().strip() == "canonical"
+            if v
+            else False
+        },
+    )
     if canonical_tag and canonical_tag.get("href"):
         try:
-            canonical = normalize_url(str(canonical_tag["href"]), page_url)
+            canonical = normalize_url(str(canonical_tag["href"]), page_url, allow_private=allow_private)
         except UrlValidationError:
             canonical = str(canonical_tag["href"]).strip()
     headings = {f"h{level}": [normalized_text(node.get_text(" ", strip=True)) for node in soup.find_all(f"h{level}")] for level in range(1, 7)}
@@ -129,6 +138,6 @@ def extract_page_signals(html: str, page_url: str, seed_url: str) -> dict[str, A
         "headings": headings,
         "images": images,
         "structured_data": parse_structured_data(soup),
-        "api_entry_points": extract_api_entry_points(html, page_url, seed_url),
-        "links": extract_links(html, page_url, seed_url),
+        "api_entry_points": extract_api_entry_points(html, page_url, seed_url, allow_private=allow_private),
+        "links": extract_links(html, page_url, seed_url, allow_private=allow_private),
     }

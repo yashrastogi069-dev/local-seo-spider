@@ -19,9 +19,29 @@ from app.knowledge import infer_source_type
 from app.normalization import normalize_page_payload
 from app.extraction_profiles import extract_profile_fields, load_profile
 from app.parser import extract_api_entry_points, extract_links, extract_page_signals, normalized_text, text_hash
-from app.types import CancellationToken, CrawlRequest, CrawlResult, CrawlStatus, EngineMode, FetchMode, LinkRecord, PageRecord
-from app.urltools import UrlValidationError, detect_api_pagination, is_same_host, normalize_url, redact_secrets_in_text, resolve_canonical_url
+from app.frontier import CrawlFrontier
+from app.types import (
+    CancellationToken,
+    CrawlRequest,
+    CrawlResult,
+    CrawlStatus,
+    EngineMode,
+    FetchMode,
+    LinkRecord,
+    PageRecord,
+)
+from app.urltools import (
+    UrlNormalizationPolicy,
+    UrlValidationError,
+    detect_api_pagination,
+    is_same_host,
+    normalize_url,
+    redact_secrets_in_text,
+    resolve_canonical_url,
+)
 from urllib.parse import urlsplit
+
+_PRESERVE_SLASH_POLICY = UrlNormalizationPolicy(trailing_slash="preserve")
 
 
 class CrawlEngine:
@@ -83,7 +103,12 @@ class CrawlEngine:
                 return None, hops, "Request ended without a response."
             if response.is_redirect and response.headers.get("location"):
                 try:
-                    current = normalize_url(response.headers["location"], current)
+                    current = normalize_url(
+                        response.headers["location"],
+                        current,
+                        allow_private=getattr(self.settings, "allow_private_crawls", False),
+                        policy=_PRESERVE_SLASH_POLICY,
+                    )
                 except UrlValidationError:
                     return response, hops, "Redirect location could not be normalized."
                 continue
@@ -111,12 +136,13 @@ class CrawlEngine:
         source_html = response.text[: self.settings.max_document_bytes] if "html" in content_type else ""
         extracted_text, extraction_error = ("", "") if source_html else extract_document_text(content_type, response.content[: self.settings.max_document_bytes])
         body_truncated = len(response.content) > self.settings.max_document_bytes
-        final_url = normalize_url(str(response.url))
+        allow_private = getattr(self.settings, "allow_private_crawls", False)
+        final_url = normalize_url(str(response.url), allow_private=allow_private)
         render_html, rendered_text, render_error = self._render(browser_page, final_url) if source_html else ("", "", "")
         effective_rendered_text = rendered_text or extracted_text
-        source_signals = extract_page_signals(source_html, final_url, request.start_url) if source_html else self._empty_signals()
-        rendered_signals = extract_page_signals(render_html, final_url, request.start_url) if render_html else self._empty_signals()
-        payload_api_entries = extract_api_entry_points(extracted_text, final_url, request.start_url) if extracted_text and not source_html else []
+        source_signals = extract_page_signals(source_html, final_url, request.start_url, allow_private=allow_private) if source_html else self._empty_signals()
+        rendered_signals = extract_page_signals(render_html, final_url, request.start_url, allow_private=allow_private) if render_html else self._empty_signals()
+        payload_api_entries = extract_api_entry_points(extracted_text, final_url, request.start_url, allow_private=allow_private) if extracted_text and not source_html else []
         selected_structured_data = rendered_signals["structured_data"] or source_signals["structured_data"]
         extracted_fields = extract_profile_fields(self.extraction_profile, final_url, source_html, render_html, selected_structured_data)
         extraction_notes = [
@@ -133,7 +159,7 @@ class CrawlEngine:
         etag = response.headers.get("etag", "").strip()
         last_modified = response.headers.get("last-modified", "").strip()
         canonical_raw = selected["canonical"] or source_signals["canonical"]
-        canonical = resolve_canonical_url(canonical_raw, final_url)
+        canonical = resolve_canonical_url(canonical_raw, final_url, allow_private=allow_private)
 
         engine_mode = getattr(request, "executor_mode", "serial") or getattr(self.settings, "crawl_executor_mode", "serial")
         status_code = response.status_code if response else None
@@ -206,7 +232,12 @@ class CrawlEngine:
                 return url, None, hops, "Request ended without a response."
             if response.is_redirect and response.headers.get("location"):
                 try:
-                    current = normalize_url(response.headers["location"], current)
+                    current = normalize_url(
+                        response.headers["location"],
+                        current,
+                        allow_private=getattr(self.settings, "allow_private_crawls", False),
+                        policy=_PRESERVE_SLASH_POLICY,
+                    )
                 except UrlValidationError:
                     return url, self._response_payload(response), hops, "Redirect location could not be normalized."
                 continue
@@ -254,8 +285,16 @@ class CrawlEngine(CrawlEngine):
         start_time = time.monotonic()
         started_at = self._now()
         mode = self._executor_mode(request)
-        queue = deque(request.url_list if request.mode == "list" else [request.start_url])
-        queued = set(queue)
+        frontier = CrawlFrontier(
+            start_url=request.start_url,
+            max_urls=request.max_urls,
+            max_depth=getattr(request, "max_depth", 10),
+            mode=request.mode,
+            url_list=request.url_list,
+            allow_private=getattr(self.settings, "allow_private_crawls", False),
+            max_retries=self.settings.max_request_retries,
+            retry_backoff_seconds=self.settings.retry_backoff_seconds,
+        )
         pages: list[PageRecord] = []
         links: list[LinkRecord] = []
         seen_content_hashes: dict[str, str] = {}
@@ -266,27 +305,36 @@ class CrawlEngine(CrawlEngine):
             robots, robots_status = self._robots(client, request.start_url)
         thread_gate = Lock()
         last_request = {"value": time.monotonic()}
-        while queue and len(pages) < request.max_urls:
+        while not frontier.is_complete() and len(pages) < request.max_urls:
             if cancellation_token and cancellation_token.is_cancelled():
                 break
-            batch: list[str] = []
-            while queue and len(batch) < self._worker_count(request):
-                url = queue.popleft()
-                if robots.can_fetch(self.settings.user_agent, url):
-                    batch.append(url)
+            batch_entries: list[FrontierEntry] = []
+            while len(batch_entries) < self._worker_count(request) and not frontier.is_complete():
+                entry = frontier.get_next()
+                if entry is None:
+                    break
+                if robots.can_fetch(self.settings.user_agent, entry.url):
+                    batch_entries.append(entry)
                 else:
+                    frontier.mark_skipped(entry.url, reason="robots_disallowed")
                     pages.append(
                         PageRecord(
-                            url=url, final_url=url, status_code=None, content_type="", title="", description="", headings={}, canonical="",
+                            url=entry.url, final_url=entry.url, depth=entry.depth, parent_url=entry.parent_url, status_code=None, content_type="", title="", description="", headings={}, canonical="",
                             meta_robots="", x_robots="", source_html="", rendered_html="", rendered_text="", images=[], structured_data=[],
                             redirect_chain=[], fetch_error="", render_error="", robots_allowed=False, discovered_at=self._now(), content_hash="",
-                            normalized_url=url, fetch_strategy="static", crawler_engine=mode, response_bytes=0, duration_ms=0.0,
+                            normalized_url=entry.url, fetch_strategy="static", crawler_engine=mode, response_bytes=0, duration_ms=0.0,
                             error_category="robots_disallowed", headers={},
                         )
                     )
-            if pages and not batch:
-                progress(len(pages), len(queue), robots_status)
+            if pages and not batch_entries:
+                progress(len(pages), frontier.queue_size, robots_status)
+                if frontier.is_complete():
+                    break
+                time.sleep(0.02)
                 continue
+
+            batch = [e.url for e in batch_entries]
+            batch_map = {e.url: e for e in batch_entries}
             if self._executor_mode(request) == "async":
                 try:
                     loop = asyncio.get_running_loop()
@@ -311,13 +359,29 @@ class CrawlEngine(CrawlEngine):
                 with ThreadPoolExecutor(max_workers=self.settings.thread_workers) as executor:
                     fetched = list(executor.map(lambda url: self._thread_fetch_with_gate(url, thread_gate, last_request, request.delay_seconds), batch))
                 materialized = [self._materialize_static(request, result) for result in fetched]
+
             for page, page_links in materialized:
+                orig_entry = batch_map.get(page.url)
+                if orig_entry:
+                    page.depth = orig_entry.depth
+                    page.parent_url = orig_entry.parent_url
+
+                if page.final_url and page.final_url != page.url:
+                    frontier.handle_redirect(page.url, page.final_url, page.depth, page.parent_url, enqueue_target=False)
+
                 # Deduplication detection
                 is_dup = False
                 dup_of = ""
-                if page.canonical and page.canonical in seen_canonicals and page.canonical != page.final_url:
-                    is_dup = True
-                    dup_of = seen_canonicals[page.canonical]
+                if page.canonical and page.canonical != page.final_url:
+                    is_canon_dup = frontier.handle_canonical(page.final_url, page.canonical)
+                    if is_canon_dup:
+                        is_dup = True
+                        dup_of = page.canonical
+                    elif page.canonical in seen_canonicals:
+                        is_dup = True
+                        dup_of = seen_canonicals[page.canonical]
+                    else:
+                        seen_canonicals[page.canonical] = page.final_url
                 elif page.content_hash and page.content_hash in seen_content_hashes and (page.rendered_text or page.extracted_text or page.source_html):
                     is_dup = True
                     dup_of = seen_content_hashes[page.content_hash]
@@ -329,10 +393,17 @@ class CrawlEngine(CrawlEngine):
                 page.is_duplicate = is_dup
                 page.duplicate_of = dup_of
 
+                if is_dup:
+                    frontier.mark_duplicate(page.url, dup_of)
+                elif page.status_code and page.status_code >= 400:
+                    frontier.mark_failed(page.url, f"HTTP {page.status_code}", is_retryable=False)
+                else:
+                    frontier.mark_completed(page.url, status_code=page.status_code or 200)
+
                 pages.append(page)
                 links.extend(page_links)
-                self._enqueue_discovered(request, page, page_links, queue, queued, pagination_counts)
-                progress(len(pages), len(queue), robots_status)
+                self._enqueue_discovered(request, page, page_links, frontier, pagination_counts)
+                progress(len(pages), frontier.queue_size, robots_status)
 
         pages_to_return = pages[: request.max_urls]
         finished_at = self._now()
@@ -352,6 +423,8 @@ class CrawlEngine(CrawlEngine):
             else ("max_urls_reached" if len(pages) >= request.max_urls else "queue_empty")
         )
 
+        accounting = frontier.reconcile_accounting()
+
         return CrawlResult(
             crawl_id=getattr(request, "crawl_id", ""),
             requested_engine=mode,
@@ -365,11 +438,11 @@ class CrawlEngine(CrawlEngine):
             duration_ms=duration_ms,
             status=status,
             termination_reason=termination_reason,
-            pages_discovered=len(queued),
+            pages_discovered=frontier.total_discovered,
             pages_attempted=len(pages_to_return),
             pages_succeeded=pages_succeeded,
             pages_failed=pages_failed,
-            pages_skipped=0,
+            pages_skipped=accounting.get("skipped", 0),
             duplicates_count=sum(1 for p in pages_to_return if p.is_duplicate),
             retry_count=0,
             errors=[p.fetch_error for p in pages_to_return if p.fetch_error],
@@ -402,8 +475,16 @@ class CrawlEngine(CrawlEngine):
             return self._run_static_mode(request, progress, cancellation_token)
         start_time = time.monotonic()
         started_at = self._now()
-        queue = deque(request.url_list if request.mode == "list" else [request.start_url])
-        queued = set(queue)
+        frontier = CrawlFrontier(
+            start_url=request.start_url,
+            max_urls=request.max_urls,
+            max_depth=getattr(request, "max_depth", 10),
+            mode=request.mode,
+            url_list=request.url_list,
+            allow_private=getattr(self.settings, "allow_private_crawls", False),
+            max_retries=self.settings.max_request_retries,
+            retry_backoff_seconds=self.settings.retry_backoff_seconds,
+        )
         pages: list[PageRecord] = []
         links: list[LinkRecord] = []
         seen_content_hashes: dict[str, str] = {}
@@ -428,21 +509,30 @@ class CrawlEngine(CrawlEngine):
                 except Exception:
                     browser_page = None
             try:
-                while queue and len(pages) < request.max_urls:
+                while not frontier.is_complete() and len(pages) < request.max_urls:
                     if cancellation_token and cancellation_token.is_cancelled():
                         break
-                    url = queue.popleft()
+                    entry = frontier.get_next()
+                    if entry is None:
+                        if frontier.is_complete():
+                            break
+                        time.sleep(0.02)
+                        continue
+                    url = entry.url
+                    depth = entry.depth
+                    parent_url = entry.parent_url
                     if not robots.can_fetch(self.settings.user_agent, url):
+                        frontier.mark_skipped(url, reason="robots_disallowed")
                         pages.append(
                             PageRecord(
-                                url=url, final_url=url, status_code=None, content_type="", title="", description="", headings={}, canonical="",
+                                url=url, final_url=url, depth=depth, parent_url=parent_url, status_code=None, content_type="", title="", description="", headings={}, canonical="",
                                 meta_robots="", x_robots="", source_html="", rendered_html="", rendered_text="", images=[], structured_data=[],
                                 redirect_chain=[], fetch_error="", render_error="", robots_allowed=False, discovered_at=self._now(), content_hash="",
                                 normalized_url=url, fetch_strategy="static", crawler_engine="serial", response_bytes=0, duration_ms=0.0,
                                 error_category="robots_disallowed", headers={},
                             )
                         )
-                        progress(len(pages), len(queue), robots_status)
+                        progress(len(pages), frontier.queue_size, robots_status)
                         continue
                     pause = request.delay_seconds - (time.monotonic() - last_request_at)
                     if pause > 0:
@@ -450,17 +540,30 @@ class CrawlEngine(CrawlEngine):
                     response, redirect_chain, fetch_error = self._fetch(client, url)
                     last_request_at = time.monotonic()
                     if not response:
-                        pages.append(self._error_page(url, redirect_chain, fetch_error, "serial"))
-                        progress(len(pages), len(queue), robots_status)
+                        frontier.mark_failed(url, fetch_error, is_retryable=False)
+                        pages.append(self._error_page(url, redirect_chain, fetch_error, "serial", depth=depth, parent_url=parent_url))
+                        progress(len(pages), frontier.queue_size, robots_status)
                         continue
-                    page, page_links = self._build_page(request, url, response, redirect_chain, fetch_error, browser_page)
+
+                    final_url = normalize_url(str(response.url), allow_private=getattr(self.settings, "allow_private_crawls", False))
+                    if final_url != url:
+                        frontier.handle_redirect(url, final_url, depth, parent_url, enqueue_target=False)
+
+                    page, page_links = self._build_page(request, url, response, redirect_chain, fetch_error, browser_page, parent_url=parent_url, depth=depth)
 
                     # Deduplication detection
                     is_dup = False
                     dup_of = ""
-                    if page.canonical and page.canonical in seen_canonicals and page.canonical != page.final_url:
-                        is_dup = True
-                        dup_of = seen_canonicals[page.canonical]
+                    if page.canonical and page.canonical != page.final_url:
+                        is_canon_dup = frontier.handle_canonical(page.final_url, page.canonical)
+                        if is_canon_dup:
+                            is_dup = True
+                            dup_of = page.canonical
+                        elif page.canonical in seen_canonicals:
+                            is_dup = True
+                            dup_of = seen_canonicals[page.canonical]
+                        else:
+                            seen_canonicals[page.canonical] = page.final_url
                     elif page.content_hash and page.content_hash in seen_content_hashes and (page.rendered_text or page.extracted_text or page.source_html):
                         is_dup = True
                         dup_of = seen_content_hashes[page.content_hash]
@@ -472,10 +575,17 @@ class CrawlEngine(CrawlEngine):
                     page.is_duplicate = is_dup
                     page.duplicate_of = dup_of
 
+                    if is_dup:
+                        frontier.mark_duplicate(url, dup_of)
+                    elif response.status_code and response.status_code >= 400:
+                        frontier.mark_failed(url, f"HTTP {response.status_code}", is_retryable=False)
+                    else:
+                        frontier.mark_completed(url, status_code=response.status_code or 200)
+
                     links.extend(page_links)
                     pages.append(page)
-                    self._enqueue_discovered(request, page, page_links, queue, queued, pagination_counts)
-                    progress(len(pages), len(queue), robots_status)
+                    self._enqueue_discovered(request, page, page_links, frontier, pagination_counts)
+                    progress(len(pages), frontier.queue_size, robots_status)
             finally:
                 if browser:
                     browser.close()
@@ -502,6 +612,8 @@ class CrawlEngine(CrawlEngine):
             else ("max_urls_reached" if len(pages) >= request.max_urls else "queue_empty")
         )
 
+        accounting = frontier.reconcile_accounting()
+
         return CrawlResult(
             crawl_id=getattr(request, "crawl_id", ""),
             requested_engine="serial",
@@ -515,11 +627,11 @@ class CrawlEngine(CrawlEngine):
             duration_ms=duration_ms,
             status=status,
             termination_reason=termination_reason,
-            pages_discovered=len(queued),
+            pages_discovered=frontier.total_discovered,
             pages_attempted=len(pages_to_return),
             pages_succeeded=pages_succeeded,
             pages_failed=pages_failed,
-            pages_skipped=0,
+            pages_skipped=accounting.get("skipped", 0),
             duplicates_count=sum(1 for p in pages_to_return if p.is_duplicate),
             retry_count=0,
             errors=[p.fetch_error for p in pages_to_return if p.fetch_error],
@@ -536,31 +648,41 @@ class CrawlEngine(CrawlEngine):
     def _empty_signals() -> dict[str, object]:
         return {"title": "", "description": "", "headings": {}, "canonical": "", "meta_robots": "", "images": [], "structured_data": [], "api_entry_points": [], "links": []}
 
-    def _enqueue_discovered(self, request: CrawlRequest, page: PageRecord, page_links: list[LinkRecord], queue: deque[str], queued: set[str], pagination_counts: dict[str, int] | None = None) -> None:
+    def _enqueue_discovered(
+        self,
+        request: CrawlRequest,
+        page: PageRecord,
+        page_links: list[LinkRecord],
+        frontier: Any,
+        pagination_counts: Any = None,
+    ) -> None:
         if request.mode != "site":
             return
         targets: list[str] = [link.target_url for link in page_links if link.is_internal and not (request.respect_nofollow and link.nofollow)]
         if request.follow_api_entry_points:
             targets.extend(str(entry.get("url", "")) for entry in page.api_entry_points if entry.get("method", "GET") == "GET" and entry.get("is_internal"))
+        valid_targets: list[str] = []
         for raw_target in targets:
             if not raw_target:
                 continue
-            try:
-                target = normalize_url(raw_target)
-            except Exception:
-                continue
-            if not target or target in queued or len(queued) >= request.max_urls:
-                continue
             # API pagination loop detection & budgeting
-            is_pag, base_path, pag_val = detect_api_pagination(target)
-            if is_pag and pagination_counts is not None:
+            is_pag, base_path, pag_val = detect_api_pagination(raw_target)
+            if is_pag and isinstance(pagination_counts, dict):
                 count = pagination_counts.get(base_path, 0)
                 if count >= 3 or pag_val > 90:
                     continue
                 pagination_counts[base_path] = count + 1
+            valid_targets.append(raw_target)
 
-            queued.add(target)
-            queue.append(target)
+        if hasattr(frontier, "discover"):
+            frontier.discover(valid_targets, parent_url=page.final_url or page.url, parent_depth=page.depth)
+        else:
+            # Legacy deque + set support for internal test compatibility
+            queued = pagination_counts if isinstance(pagination_counts, set) else set()
+            for raw_t in valid_targets:
+                if raw_t not in queued and len(queued) < request.max_urls:
+                    queued.add(raw_t)
+                    frontier.append(raw_t)
 
 
     @staticmethod
@@ -586,11 +708,12 @@ class CrawlEngine(CrawlEngine):
         return result
 
     @staticmethod
-    def _error_page(url: str, redirect_chain: list[dict[str, object]], error: str, engine_mode: str = "serial") -> PageRecord:
+    def _error_page(url: str, redirect_chain: list[dict[str, object]], error: str, engine_mode: str = "serial", depth: int = 0, parent_url: str = "") -> PageRecord:
         return PageRecord(
             url=url, final_url=url, status_code=None, content_type="", title="", description="", headings={}, canonical="", meta_robots="",
             x_robots="", source_html="", rendered_html="", rendered_text="", images=[], structured_data=[], redirect_chain=redirect_chain,
             fetch_error=error, render_error="", discovered_at=CrawlEngine._now(), content_hash="",
+            depth=depth, parent_url=parent_url,
             normalized_url=url,
             fetch_strategy="static",
             crawler_engine=engine_mode,

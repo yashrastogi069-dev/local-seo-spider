@@ -53,10 +53,20 @@ This document defines the strict, non-negotiable release gates for every phase o
 - [x] Fresh-Eyes Architecture Review completed by subagent; all P0/P1 contract issues addressed.
 - **SUBPHASE 2A GATE STATUS**: **PASSED**
 
-#### Subphase 2B: Engine Independence & Browser Integration
-- [ ] Serial engine standalone rewrite with persistent HTTP client and clean Playwright lifecycle.
-- [ ] Browser crash and timeout error recovery without silent static fallback.
-- **SUBPHASE 2B GATE STATUS**: **PENDING**
+#### Subphase 2B: URL Normalization + Frontier + Crawl Lifecycle
+- [x] RFC 3986 URL normalization policy: scheme/host casing, default port stripping, dot segment removal, percent-encoding canonicalization, deterministic query sorting & deduplication, marketing parameter stripping.
+- [x] Sensitive parameters (`token`, `api_key`, `secret`) preserved by default during HTTP crawler dispatch to avoid broken requests; opt-in redaction for reports and exports.
+- [x] Conservative trailing slash policy (default `"strip"`, preserving slash for redirect `Location` header resolution to prevent redirect loops).
+- [x] Strict 8-state frontier finite state machine (`DISCOVERED`, `QUEUED`, `FETCHING`, `COMPLETED`, `FAILED_RETRYABLE`, `FAILED_FINAL`, `SKIPPED`, `DUPLICATE`).
+- [x] Invalid transition rejection (`InvalidStateTransitionError`) and idempotent terminal state handling preventing race conditions or worker leaks.
+- [x] Exponential backoff retry pool with jitter/delay calculation and max retry enforcement.
+- [x] Redirect destination alias mapping and target completion tracking (`enqueue_target=False`) preventing duplicate fetches.
+- [x] Canonical tag duplicate detection with domain filtering.
+- [x] Exact mathematical frontier accounting reconciliation (`admitted == queued + fetching + completed + failed + skipped + duplicate`).
+- [x] Controlled crawler fixture (`tests/controlled_crawler_server.py`) with 19 deterministic endpoints verifying circular link termination, A-B-A cycle bounding, fragment deduplication, canonical duplicates, depth bounds, page budgets, and 429 retries.
+- [x] 100% test pass rate across targeted suites (52/52) and full repository regression suite (182 passed, 2 skipped, 0 failed).
+- [x] Fresh-Eyes subagent review completed with all findings addressed.
+- **SUBPHASE 2B GATE STATUS**: **PASSED**
 
 #### Subphase 2C: Concurrency Engines (Threaded, Async, Multiprocess)
 - [ ] Threaded engine with per-domain politeness and shared connection pool.
