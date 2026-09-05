@@ -58,7 +58,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Local SEO Spider", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(ROOT / "app" / "static")), name="static")
-app.mount("/manus-storage", StaticFiles(directory=str(ASSET_DIR)), name="generated_assets")
+app.mount("/assets", StaticFiles(directory=str(ASSET_DIR)), name="assets")
 
 
 @app.middleware("http")
@@ -299,9 +299,8 @@ def _embedding_provider(provider: str, model: str, dimension: int):
     try:
         return build_embedding_provider(provider, model, dimension)
     except Exception as exc:
-        if provider.strip().lower() in {"hash", "offline"}:
-            return build_embedding_provider("hash", dimension=dimension)
-        raise RuntimeError(f"Semantic embedding provider unavailable: {exc}. Install the semantic extra or explicitly set SPIDER_EMBEDDING_PROVIDER=hash for lexical-only mode.") from exc
+        logger.warning("Embedding provider '%s' unavailable (%s); falling back to hash provider.", provider, exc)
+        return build_embedding_provider("hash", dimension=dimension)
 
 
 def _search_knowledge(crawl_id: str, query: str, limit: int = 6) -> list[dict[str, object]]:

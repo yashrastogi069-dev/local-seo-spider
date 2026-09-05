@@ -44,3 +44,31 @@ def test_analyzer_emits_prioritized_evidence_for_common_audit_conflicts() -> Non
     assert by_key["duplicate_title"].severity == "medium"
     assert by_key["duplicate_description"].severity == "low"
     assert by_key["duplicate_content"].title == "Duplicate rendered content"
+
+
+def test_compute_crawl_coverage_metrics_precision_and_bounds() -> None:
+    from app.analyzer import compute_crawl_coverage_metrics
+
+    p1 = page("https://example.test/", status_code=200, content_type="text/html", rendered_text="Hello world from test page")
+    p2 = page("https://example.test/about", status_code=200, content_type="text/html", rendered_text="About us page with more words")
+    p3 = page("https://example.test/dup", status_code=200, is_duplicate=True)
+    p4 = page("https://example.test/api/data", status_code=200, content_type="application/json", source_type="official_api")
+
+    links = [
+        LinkRecord("https://example.test/", "https://example.test/about", "/about", "About", "", True, False),
+        LinkRecord("https://example.test/", "https://example.test/contact", "/contact", "Contact", "", True, False),
+        LinkRecord("https://example.test/", "https://example.test/terms", "/terms", "Terms", "", True, False),
+    ]
+
+    metrics = compute_crawl_coverage_metrics([p1, p2, p3, p4], links)
+    assert metrics["total_crawled_urls"] == 4
+    # Discovered = 4 crawled + contact + terms = 6
+    assert metrics["total_discovered_urls"] == 6
+    assert metrics["crawl_coverage_rate"] == round(4 / 6, 2)
+    assert 0.0 <= metrics["crawl_coverage_rate"] <= 1.0
+    assert metrics["duplicates_detected"] == 1
+    assert metrics["api_endpoints_indexed"] == 1
+    assert metrics["status_code_distribution"]["200"] == 4
+    assert metrics["content_type_distribution"]["text/html"] == 3
+    assert metrics["content_type_distribution"]["application/json"] == 1
+

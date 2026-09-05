@@ -180,7 +180,7 @@ def test_operator_can_pause_and_resume_a_queued_local_job(tmp_path, monkeypatch)
 
 
 def test_local_workflow_api_runs_read_only_knowledge_nodes(tmp_path, monkeypatch) -> None:
-    local_settings = replace(main.settings, data_dir=tmp_path / "data", render_enabled=False)
+    local_settings = replace(main.settings, data_dir=tmp_path / "data", render_enabled=False, embedding_provider="hash")
     monkeypatch.setattr(main, "settings", local_settings)
     monkeypatch.setattr(main, "database", Database(local_settings.database_path))
     monkeypatch.setattr(main, "_start_worker", lambda: None)

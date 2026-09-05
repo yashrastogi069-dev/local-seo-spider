@@ -33,3 +33,24 @@ def test_real_semantic_provider_separates_paraphrase_from_unrelated_text() -> No
 def test_unknown_embedding_provider_is_rejected() -> None:
     with pytest.raises(ValueError, match="Unknown embedding provider"):
         build_embedding_provider("unknown")
+
+
+def test_hash_embedding_cosine_similarity_bounds_and_consistency() -> None:
+    from app.embeddings import cosine_similarity
+    provider = HashEmbeddingProvider(dimension=64)
+    v1 = provider.embed("short text")
+    v2 = provider.embed("a much longer piece of text with various terms and repeated words")
+    v3 = provider.embed("completely unrelated distinct terminology")
+    
+    assert len(v1) == 64
+    assert len(v2) == 64
+    assert len(v3) == 64
+    
+    sim1 = cosine_similarity(v1, v2)
+    sim2 = cosine_similarity(v1, v3)
+    sim_self = cosine_similarity(v1, v1)
+    
+    assert -1.0 <= sim1 <= 1.0
+    assert -1.0 <= sim2 <= 1.0
+    assert sim_self == pytest.approx(1.0)
+

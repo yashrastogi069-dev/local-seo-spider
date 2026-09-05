@@ -2,7 +2,37 @@
   <div class="answer-label">{% if result.grounded %}EVIDENCE-BACKED RESULT{% else %}INSUFFICIENT EVIDENCE{% endif %}</div>
   <h3>{{ result.question or 'Website question' }}</h3>
   <p class="answer-copy">{{ result.answer }}</p>
-  {% if result.grounded %}<div class="answer-meta">Confidence: <strong>{{ result.confidence }}</strong> · {{ result.retrieval_mode }} · {{ result.answer_mode }}</div>{% endif %}
+  {% if result.grounded %}
+  <div class="answer-meta">
+    Confidence: <strong>{{ result.confidence }}</strong>
+    {% if result.claim_grounding_rate is defined %} · Grounding: <strong>{{ (result.claim_grounding_rate * 100)|round|int }}%</strong>{% endif %}
+    · {{ result.retrieval_mode }} · {{ result.answer_mode }}
+  </div>
+  {% endif %}
+  {% if result.claims %}
+  <div class="claims-section">
+    <div class="claims-header">
+      <strong>Claim-Level Grounding Verification</strong>
+      <span class="grounding-badge {% if result.claim_grounding_rate == 1.0 %}grounding-pass{% else %}grounding-fail{% endif %}">
+        {% if result.claim_grounding_rate == 1.0 %}100% Grounded{% else %}Ungrounded Claims Fallback{% endif %}
+      </span>
+    </div>
+    <ul class="claims-list">
+      {% for c in result.claims %}
+      <li class="claim-item {% if c.grounded %}claim-grounded{% else %}claim-ungrounded{% endif %}">
+        <div class="claim-body">
+          <span class="claim-status-tag">{% if c.grounded %}✓ GROUNDED{% else %}✗ UNGROUNDED{% endif %}</span>
+          <span class="claim-text">{{ c.claim }}</span>
+        </div>
+        <div class="claim-meta">
+          {% if c.citations %}<span>Citations: [{% for cit in c.citations %}{{ cit }}{% if not loop.last %}, {% endif %}{% endfor %}]</span>{% endif %}
+          {% if c.reason %}<span class="claim-reason">{{ c.reason }}</span>{% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
   {% if result.citations %}
   <div class="citation-list" aria-label="Answer citations">
     {% for citation in result.citations %}
@@ -14,3 +44,4 @@
   </div>
   {% endif %}
 </div>
+

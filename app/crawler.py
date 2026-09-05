@@ -15,11 +15,13 @@ import httpx
 
 from app.config import Settings
 from app.documents import extract_document_text
+from app.knowledge import infer_source_type
 from app.normalization import normalize_page_payload
 from app.extraction_profiles import extract_profile_fields, load_profile
 from app.parser import extract_api_entry_points, extract_links, extract_page_signals, normalized_text, text_hash
 from app.types import CrawlRequest, LinkRecord, PageRecord
-from app.urltools import UrlValidationError, is_same_host, normalize_url
+from app.urltools import UrlValidationError, detect_api_pagination, is_same_host, normalize_url, redact_secrets_in_text, resolve_canonical_url
+from urllib.parse import urlsplit
 
 
 class CrawlEngine:
@@ -102,15 +104,16 @@ class CrawlEngine:
         except Exception as exc:  # Browser-originated errors are recoverable per page.
             return "", "", f"Rendered inspection failed: {type(exc).__name__}: {exc}"
 
-    def _build_page(self, request: CrawlRequest, url: str, response: httpx.Response | None, redirect_chain: list[dict[str, object]], fetch_error: str, browser_page: object | None = None) -> tuple[PageRecord, list[LinkRecord]]:
+    def _build_page(self, request: CrawlRequest, url: str, response: httpx.Response | None, redirect_chain: list[dict[str, object]], fetch_error: str, browser_page: object | None = None, parent_url: str = "", depth: int = 0) -> tuple[PageRecord, list[LinkRecord]]:
         if not response:
             return self._error_page(url, redirect_chain, fetch_error), []
-        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower().strip()
         source_html = response.text[: self.settings.max_document_bytes] if "html" in content_type else ""
         extracted_text, extraction_error = ("", "") if source_html else extract_document_text(content_type, response.content[: self.settings.max_document_bytes])
         body_truncated = len(response.content) > self.settings.max_document_bytes
         final_url = normalize_url(str(response.url))
         render_html, rendered_text, render_error = self._render(browser_page, final_url) if source_html else ("", "", "")
+        effective_rendered_text = rendered_text or extracted_text
         source_signals = extract_page_signals(source_html, final_url, request.start_url) if source_html else self._empty_signals()
         rendered_signals = extract_page_signals(render_html, final_url, request.start_url) if render_html else self._empty_signals()
         payload_api_entries = extract_api_entry_points(extracted_text, final_url, request.start_url) if extracted_text and not source_html else []
@@ -123,18 +126,29 @@ class CrawlEngine:
         selected = rendered_signals if rendered_signals["title"] or rendered_signals["links"] else source_signals
         page_links = self._dedupe_links(source_signals["links"] + rendered_signals["links"])
         api_entry_points = self._dedupe_api_entry_points(source_signals["api_entry_points"] + rendered_signals["api_entry_points"] + payload_api_entries)
+        title = selected["title"] or source_signals["title"]
+        if not title and "json" in content_type:
+            title = f"API {urlsplit(final_url).path}"
+        source_type = infer_source_type(final_url, content_type)
+        etag = response.headers.get("etag", "").strip()
+        last_modified = response.headers.get("last-modified", "").strip()
+        canonical_raw = selected["canonical"] or source_signals["canonical"]
+        canonical = resolve_canonical_url(canonical_raw, final_url)
+
         page = PageRecord(
             url=url, final_url=final_url, status_code=response.status_code, content_type=content_type,
-            title=selected["title"] or source_signals["title"], description=selected["description"] or source_signals["description"],
-            headings=selected["headings"] or source_signals["headings"], canonical=selected["canonical"] or source_signals["canonical"],
+            title=title, description=selected["description"] or source_signals["description"],
+            headings=selected["headings"] or source_signals["headings"], canonical=canonical,
             meta_robots=selected["meta_robots"] or source_signals["meta_robots"], x_robots=response.headers.get("x-robots-tag", "").lower(),
-            source_html=source_html, rendered_html=render_html, rendered_text=rendered_text, extracted_text=extracted_text, extraction_error=extraction_error, images=selected["images"] or source_signals["images"],
+            source_html=source_html, rendered_html=render_html, rendered_text=effective_rendered_text, extracted_text=extracted_text, extraction_error=extraction_error, images=selected["images"] or source_signals["images"],
             structured_data=selected["structured_data"] or source_signals["structured_data"], api_entry_points=api_entry_points, redirect_chain=redirect_chain,
             fetch_error=fetch_error, render_error=render_error, robots_allowed=True, body_truncated=body_truncated,
             extracted_fields=extracted_fields, extraction_notes=extraction_notes,
-            discovered_at=self._now(), content_hash=text_hash(rendered_text or source_html or extracted_text),
+            discovered_at=self._now(), content_hash=text_hash(effective_rendered_text or source_html or extracted_text),
+            etag=etag, last_modified=last_modified, source_type=source_type, depth=depth, parent_url=parent_url,
         )
         return PageRecord(**normalize_page_payload(page.to_dict())), page_links
+
 
     @staticmethod
     def _response_payload(response: httpx.Response | None) -> tuple[int, dict[str, str], bytes, str] | None:
@@ -224,6 +238,9 @@ class CrawlEngine(CrawlEngine):
         queued = set(queue)
         pages: list[PageRecord] = []
         links: list[LinkRecord] = []
+        seen_content_hashes: dict[str, str] = {}
+        seen_canonicals: dict[str, str] = {}
+        pagination_counts: dict[str, int] = {}
         headers = {"User-Agent": self.settings.user_agent, "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json,application/xml,text/csv"}
         with httpx.Client(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
             robots, robots_status = self._robots(client, request.start_url)
@@ -241,21 +258,50 @@ class CrawlEngine(CrawlEngine):
                 progress(len(pages), len(queue), robots_status)
                 continue
             if self._executor_mode(request) == "async":
-                results = asyncio.run(self._async_batch(batch, request.delay_seconds))
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop and loop.is_running():
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        results = pool.submit(asyncio.run, self._async_batch(batch, request.delay_seconds)).result()
+                else:
+                    results = asyncio.run(self._async_batch(batch, request.delay_seconds))
                 materialized = [self._materialize_static(request, result) for result in results]
             elif self._executor_mode(request) == "process":
-                fetched = [self._thread_fetch_with_gate(url, thread_gate, last_request, request.delay_seconds) for url in batch]
-                with ProcessPoolExecutor(max_workers=self.settings.process_workers) as executor:
-                    processed = executor.map(_materialize_static_process, [(self.settings, request, result) for result in fetched])
-                    materialized = [(PageRecord(**page), [LinkRecord(**link) for link in page_links]) for page, page_links in processed]
+                try:
+                    fetched = [self._thread_fetch_with_gate(url, thread_gate, last_request, request.delay_seconds) for url in batch]
+                    with ProcessPoolExecutor(max_workers=self.settings.process_workers) as executor:
+                        processed = list(executor.map(_materialize_static_process, [(self.settings, request, result) for result in fetched]))
+                        materialized = [(PageRecord(**page), [LinkRecord(**link) for link in page_links]) for page, page_links in processed]
+                except Exception as exc:
+                    raise RuntimeError(f"Process executor mode failed: {type(exc).__name__}: {exc}") from exc
             else:
                 with ThreadPoolExecutor(max_workers=self.settings.thread_workers) as executor:
                     fetched = list(executor.map(lambda url: self._thread_fetch_with_gate(url, thread_gate, last_request, request.delay_seconds), batch))
                 materialized = [self._materialize_static(request, result) for result in fetched]
             for page, page_links in materialized:
+                # Deduplication detection
+                is_dup = False
+                dup_of = ""
+                if page.canonical and page.canonical in seen_canonicals and page.canonical != page.final_url:
+                    is_dup = True
+                    dup_of = seen_canonicals[page.canonical]
+                elif page.content_hash and page.content_hash in seen_content_hashes and (page.rendered_text or page.extracted_text or page.source_html):
+                    is_dup = True
+                    dup_of = seen_content_hashes[page.content_hash]
+                else:
+                    if page.canonical:
+                        seen_canonicals[page.canonical] = page.final_url
+                    if page.content_hash:
+                        seen_content_hashes[page.content_hash] = page.final_url
+                page.is_duplicate = is_dup
+                page.duplicate_of = dup_of
+
                 pages.append(page)
                 links.extend(page_links)
-                self._enqueue_discovered(request, page, page_links, queue, queued)
+                self._enqueue_discovered(request, page, page_links, queue, queued, pagination_counts)
                 progress(len(pages), len(queue), robots_status)
         return pages[: request.max_urls], links, robots_status
 
@@ -285,6 +331,9 @@ class CrawlEngine(CrawlEngine):
         queued = set(queue)
         pages: list[PageRecord] = []
         links: list[LinkRecord] = []
+        seen_content_hashes: dict[str, str] = {}
+        seen_canonicals: dict[str, str] = {}
+        pagination_counts: dict[str, int] = {}
         last_request_at = 0.0
         headers = {"User-Agent": self.settings.user_agent, "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json,application/xml,text/csv"}
 
@@ -326,9 +375,27 @@ class CrawlEngine(CrawlEngine):
                         progress(len(pages), len(queue), robots_status)
                         continue
                     page, page_links = self._build_page(request, url, response, redirect_chain, fetch_error, browser_page)
+
+                    # Deduplication detection
+                    is_dup = False
+                    dup_of = ""
+                    if page.canonical and page.canonical in seen_canonicals and page.canonical != page.final_url:
+                        is_dup = True
+                        dup_of = seen_canonicals[page.canonical]
+                    elif page.content_hash and page.content_hash in seen_content_hashes and (page.rendered_text or page.extracted_text or page.source_html):
+                        is_dup = True
+                        dup_of = seen_content_hashes[page.content_hash]
+                    else:
+                        if page.canonical:
+                            seen_canonicals[page.canonical] = page.final_url
+                        if page.content_hash:
+                            seen_content_hashes[page.content_hash] = page.final_url
+                    page.is_duplicate = is_dup
+                    page.duplicate_of = dup_of
+
                     links.extend(page_links)
                     pages.append(page)
-                    self._enqueue_discovered(request, page, page_links, queue, queued)
+                    self._enqueue_discovered(request, page, page_links, queue, queued, pagination_counts)
                     progress(len(pages), len(queue), robots_status)
             finally:
                 if browser:
@@ -345,17 +412,32 @@ class CrawlEngine(CrawlEngine):
     def _empty_signals() -> dict[str, object]:
         return {"title": "", "description": "", "headings": {}, "canonical": "", "meta_robots": "", "images": [], "structured_data": [], "api_entry_points": [], "links": []}
 
-    def _enqueue_discovered(self, request: CrawlRequest, page: PageRecord, page_links: list[LinkRecord], queue: deque[str], queued: set[str]) -> None:
+    def _enqueue_discovered(self, request: CrawlRequest, page: PageRecord, page_links: list[LinkRecord], queue: deque[str], queued: set[str], pagination_counts: dict[str, int] | None = None) -> None:
         if request.mode != "site":
             return
         targets: list[str] = [link.target_url for link in page_links if link.is_internal and not (request.respect_nofollow and link.nofollow)]
         if request.follow_api_entry_points:
             targets.extend(str(entry.get("url", "")) for entry in page.api_entry_points if entry.get("method", "GET") == "GET" and entry.get("is_internal"))
-        for target in targets:
+        for raw_target in targets:
+            if not raw_target:
+                continue
+            try:
+                target = normalize_url(raw_target)
+            except Exception:
+                continue
             if not target or target in queued or len(queued) >= request.max_urls:
                 continue
+            # API pagination loop detection & budgeting
+            is_pag, base_path, pag_val = detect_api_pagination(target)
+            if is_pag and pagination_counts is not None:
+                count = pagination_counts.get(base_path, 0)
+                if count >= 3 or pag_val > 90:
+                    continue
+                pagination_counts[base_path] = count + 1
+
             queued.add(target)
             queue.append(target)
+
 
     @staticmethod
     def _dedupe_api_entry_points(entries: list[dict[str, object]]) -> list[dict[str, object]]:

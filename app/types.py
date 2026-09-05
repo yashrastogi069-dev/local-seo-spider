@@ -50,6 +50,13 @@ class PageRecord:
     extraction_error: str = ""
     extracted_fields: dict[str, Any] = field(default_factory=dict)
     extraction_notes: list[str] = field(default_factory=list)
+    etag: str = ""
+    last_modified: str = ""
+    is_duplicate: bool = False
+    duplicate_of: str = ""
+    source_type: str = "html_page"
+    depth: int = 0
+    parent_url: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

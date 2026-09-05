@@ -20,6 +20,33 @@ def now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
+_QUERY_SYNONYMS: dict[str, list[str]] = {
+    "ceo": ["chief", "executive", "officer"],
+    "cto": ["chief", "technology", "officer"],
+    "cfo": ["chief", "financial", "officer"],
+    "coo": ["chief", "operating", "officer"],
+    "training": ["workshops", "curriculum", "programs"],
+    "workshops": ["training", "curriculum", "seminars"],
+    "educational": ["training", "workshops"],
+    "schema": ["record", "fields", "structure"],
+    "refund": ["return", "reimbursement"],
+    "returns": ["refund"],
+    "installation": ["install", "pip"],
+    "install": ["installation", "pip"],
+    "quickstart": ["install", "installation"],
+    "authentication": ["authenticate", "bearer", "token"],
+    "authenticate": ["authentication", "bearer"],
+    "keys": ["token", "tokens", "bearer"],
+    "key": ["token", "tokens", "bearer"],
+    "integrations": ["webhooks", "webhook"],
+    "integration": ["webhooks", "webhook"],
+    "webhooks": ["integration", "integrations"],
+    "webhook": ["integration", "integrations"],
+    "quota": ["upload", "limit", "allowance"],
+    "quotas": ["upload", "limit", "allowance"],
+}
+
+
 class Database:
     def __init__(self, path: Path):
         self.path = path
@@ -53,7 +80,10 @@ class Database:
                   rendered_text TEXT NOT NULL, extracted_text TEXT NOT NULL DEFAULT '', extraction_error TEXT NOT NULL DEFAULT '', extracted_fields_json TEXT NOT NULL DEFAULT '{}', extraction_notes_json TEXT NOT NULL DEFAULT '[]', images_json TEXT NOT NULL, structured_data_json TEXT NOT NULL, api_entry_points_json TEXT NOT NULL DEFAULT '[]',
                   redirects_json TEXT NOT NULL, fetch_error TEXT NOT NULL, render_error TEXT NOT NULL,
                   robots_allowed INTEGER NOT NULL, body_truncated INTEGER NOT NULL, discovered_at TEXT NOT NULL,
-                  internal_inlinks INTEGER NOT NULL DEFAULT 0, content_hash TEXT NOT NULL
+                  internal_inlinks INTEGER NOT NULL DEFAULT 0, content_hash TEXT NOT NULL,
+                  etag TEXT NOT NULL DEFAULT '', last_modified TEXT NOT NULL DEFAULT '',
+                  is_duplicate INTEGER NOT NULL DEFAULT 0, duplicate_of TEXT NOT NULL DEFAULT '',
+                  source_type TEXT NOT NULL DEFAULT 'html_page', depth INTEGER NOT NULL DEFAULT 0, parent_url TEXT NOT NULL DEFAULT ''
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_pages_crawl_url ON pages(crawl_id, url);
                 CREATE INDEX IF NOT EXISTS idx_pages_crawl_final ON pages(crawl_id, final_url);
@@ -71,8 +101,13 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_issues_crawl_severity ON issues(crawl_id, severity);
                 CREATE TABLE IF NOT EXISTS knowledge_chunks (
                   id INTEGER PRIMARY KEY AUTOINCREMENT, page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
-                  crawl_id TEXT NOT NULL REFERENCES crawls(id) ON DELETE CASCADE, url TEXT NOT NULL, title TEXT NOT NULL,
-                  heading_path TEXT NOT NULL, content TEXT NOT NULL, chunk_index INTEGER NOT NULL,
+                  crawl_id TEXT NOT NULL REFERENCES crawls(id) ON DELETE CASCADE, url TEXT NOT NULL,
+                  canonical_url TEXT NOT NULL DEFAULT '', title TEXT NOT NULL, section TEXT NOT NULL DEFAULT '',
+                  heading_path TEXT NOT NULL, heading_path_json TEXT NOT NULL DEFAULT '[]',
+                  content_type TEXT NOT NULL DEFAULT 'text/html', source_type TEXT NOT NULL DEFAULT 'html_page',
+                  crawl_timestamp TEXT NOT NULL DEFAULT '', parent_url TEXT NOT NULL DEFAULT '',
+                  depth INTEGER NOT NULL DEFAULT 0, content_hash TEXT NOT NULL DEFAULT '',
+                  content TEXT NOT NULL, chunk_index INTEGER NOT NULL,
                   UNIQUE(crawl_id, page_id, chunk_index)
                 );
                 CREATE INDEX IF NOT EXISTS idx_knowledge_crawl ON knowledge_chunks(crawl_id, page_id);
@@ -99,14 +134,46 @@ class Database:
             )
             self._ensure_crawl_columns(conn)
             self._ensure_page_columns(conn)
+            self._ensure_knowledge_columns(conn)
 
     @staticmethod
     def _ensure_page_columns(conn: sqlite3.Connection) -> None:
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(pages)")}
-        required = {"extracted_text": "TEXT NOT NULL DEFAULT ''", "extraction_error": "TEXT NOT NULL DEFAULT ''", "extracted_fields_json": "TEXT NOT NULL DEFAULT '{}'", "extraction_notes_json": "TEXT NOT NULL DEFAULT '[]'", "api_entry_points_json": "TEXT NOT NULL DEFAULT '[]'"}
+        required = {
+            "extracted_text": "TEXT NOT NULL DEFAULT ''",
+            "extraction_error": "TEXT NOT NULL DEFAULT ''",
+            "extracted_fields_json": "TEXT NOT NULL DEFAULT '{}'",
+            "extraction_notes_json": "TEXT NOT NULL DEFAULT '[]'",
+            "api_entry_points_json": "TEXT NOT NULL DEFAULT '[]'",
+            "etag": "TEXT NOT NULL DEFAULT ''",
+            "last_modified": "TEXT NOT NULL DEFAULT ''",
+            "is_duplicate": "INTEGER NOT NULL DEFAULT 0",
+            "duplicate_of": "TEXT NOT NULL DEFAULT ''",
+            "source_type": "TEXT NOT NULL DEFAULT 'html_page'",
+            "depth": "INTEGER NOT NULL DEFAULT 0",
+            "parent_url": "TEXT NOT NULL DEFAULT ''",
+        }
         for name, definition in required.items():
             if name not in existing:
                 conn.execute(f"ALTER TABLE pages ADD COLUMN {name} {definition}")
+
+    @staticmethod
+    def _ensure_knowledge_columns(conn: sqlite3.Connection) -> None:
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(knowledge_chunks)")}
+        required = {
+            "canonical_url": "TEXT NOT NULL DEFAULT ''",
+            "section": "TEXT NOT NULL DEFAULT ''",
+            "heading_path_json": "TEXT NOT NULL DEFAULT '[]'",
+            "content_type": "TEXT NOT NULL DEFAULT 'text/html'",
+            "source_type": "TEXT NOT NULL DEFAULT 'html_page'",
+            "crawl_timestamp": "TEXT NOT NULL DEFAULT ''",
+            "parent_url": "TEXT NOT NULL DEFAULT ''",
+            "depth": "INTEGER NOT NULL DEFAULT 0",
+            "content_hash": "TEXT NOT NULL DEFAULT ''",
+        }
+        for name, definition in required.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE knowledge_chunks ADD COLUMN {name} {definition}")
 
     @staticmethod
     def _ensure_crawl_columns(conn: sqlite3.Connection) -> None:
@@ -230,6 +297,65 @@ class Database:
             records = conn.execute("SELECT * FROM crawls ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [self._crawl_row(row) for row in records]
 
+    def get_crawl_coverage(self, crawl_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            page_rows = conn.execute(
+                "SELECT url, final_url, status_code, content_type, is_duplicate, duplicate_of, source_type, depth, rendered_text FROM pages WHERE crawl_id = ?",
+                (crawl_id,),
+            ).fetchall()
+            link_target_rows = conn.execute(
+                "SELECT DISTINCT target_url FROM links WHERE crawl_id = ?",
+                (crawl_id,),
+            ).fetchall()
+
+        crawled_urls = {r["url"] for r in page_rows}
+        discovered_urls = set(crawled_urls)
+        for r in link_target_rows:
+            target = r[0]
+            if target:
+                discovered_urls.add(target)
+        discovered_urls_count = len(discovered_urls)
+
+        status_dist: dict[str, int] = {}
+        content_dist: dict[str, int] = {}
+        duplicates_count = 0
+        api_count = 0
+        total_words = 0
+        word_count_pages = 0
+
+        for r in page_rows:
+            code = str(r["status_code"] or "error")
+            status_dist[code] = status_dist.get(code, 0) + 1
+
+            c_type = (r["content_type"] or "unknown").split(";")[0].strip().lower()
+            content_dist[c_type] = content_dist.get(c_type, 0) + 1
+
+            if r["is_duplicate"]:
+                duplicates_count += 1
+            if r["source_type"] == "official_api" or "json" in c_type:
+                api_count += 1
+
+            text = r["rendered_text"] or ""
+            words = len(text.split())
+            if words > 0:
+                total_words += words
+                word_count_pages += 1
+
+        coverage_rate = (len(crawled_urls) / discovered_urls_count) if discovered_urls_count else 1.0
+        avg_words = round(total_words / word_count_pages, 1) if word_count_pages else 0.0
+
+        return {
+            "crawl_id": crawl_id,
+            "total_crawled_urls": len(crawled_urls),
+            "total_discovered_urls": discovered_urls_count,
+            "crawl_coverage_rate": round(coverage_rate, 2),
+            "status_code_distribution": status_dist,
+            "content_type_distribution": content_dist,
+            "duplicates_detected": duplicates_count,
+            "api_endpoints_indexed": api_count,
+            "average_word_count": avg_words,
+        }
+
     def _crawl_row(self, row: sqlite3.Row) -> dict[str, Any]:
         crawl = dict(row)
         crawl["settings"] = json.loads(crawl.pop("settings_json"))
@@ -242,8 +368,9 @@ class Database:
             conn.executemany(
                 """INSERT INTO pages (crawl_id, url, final_url, status_code, content_type, title, description, headings_json,
                    canonical, meta_robots, x_robots, source_html, rendered_html, rendered_text, extracted_text, extraction_error, extracted_fields_json, extraction_notes_json, images_json, structured_data_json, api_entry_points_json,
-                   redirects_json, fetch_error, render_error, robots_allowed, body_truncated, discovered_at, internal_inlinks, content_hash)
-                                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   redirects_json, fetch_error, render_error, robots_allowed, body_truncated, discovered_at, internal_inlinks, content_hash,
+                   etag, last_modified, is_duplicate, duplicate_of, source_type, depth, parent_url)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """,
                 [
                     (
@@ -252,6 +379,9 @@ class Database:
                         page.rendered_html, page.rendered_text, page.extracted_text, page.extraction_error, json.dumps(page.extracted_fields), json.dumps(page.extraction_notes), json.dumps(page.images), json.dumps(page.structured_data), json.dumps(page.api_entry_points),
                         json.dumps(page.redirect_chain), page.fetch_error, page.render_error, int(page.robots_allowed),
                         int(page.body_truncated), page.discovered_at, page.internal_inlinks, page.content_hash,
+                        getattr(page, "etag", ""), getattr(page, "last_modified", ""),
+                        int(getattr(page, "is_duplicate", False)), getattr(page, "duplicate_of", ""),
+                        getattr(page, "source_type", "html_page"), getattr(page, "depth", 0), getattr(page, "parent_url", ""),
                     ) for page in pages
                 ],
             )
@@ -283,8 +413,11 @@ class Database:
             conn.execute("DELETE FROM knowledge_chunks WHERE crawl_id = ?", (crawl_id,))
             for chunk in materialized:
                 cursor = conn.execute(
-                    """INSERT INTO knowledge_chunks (page_id, crawl_id, url, title, heading_path, content, chunk_index)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    """INSERT INTO knowledge_chunks (
+                           page_id, crawl_id, url, canonical_url, title, section, heading_path,
+                           heading_path_json, content_type, source_type, crawl_timestamp,
+                           parent_url, depth, content_hash, content, chunk_index
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     chunk.as_row(),
                 )
                 conn.execute(
@@ -302,10 +435,23 @@ class Database:
     def get_knowledge_chunks(self, crawl_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT id, page_id, url, title, heading_path, content, chunk_index FROM knowledge_chunks WHERE crawl_id = ? ORDER BY url, chunk_index",
+                """SELECT id, page_id, crawl_id, url, canonical_url, title, section,
+                          heading_path, heading_path_json, content_type, source_type,
+                          crawl_timestamp, parent_url, depth, content_hash, content, chunk_index
+                   FROM knowledge_chunks WHERE crawl_id = ? ORDER BY url, chunk_index""",
                 (crawl_id,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            if "heading_path_json" in item and item["heading_path_json"]:
+                try:
+                    item["heading_path_list"] = json.loads(item["heading_path_json"])
+                except Exception:
+                    item["heading_path_list"] = [item.get("heading_path", "")]
+            results.append(item)
+        return results
+
 
     def knowledge_count(self, crawl_id: str) -> int:
         with self.connect() as conn:
@@ -382,7 +528,17 @@ class Database:
 
     @staticmethod
     def _query_terms(query: str) -> list[str]:
-        stop_words = {"what", "which", "where", "when", "does", "this", "that", "the", "and", "for", "from", "with", "about", "are", "is", "how", "can", "tell", "please", "who", "was", "were", "will", "would", "could", "should", "has", "have", "had", "into", "your", "our", "their"}
+        stop_words = {
+            "what", "which", "where", "when", "does", "this", "that", "the", "and",
+            "for", "from", "with", "about", "are", "is", "how", "can", "tell",
+            "please", "who", "was", "were", "will", "would", "could", "should",
+            "has", "have", "had", "into", "your", "our", "their", "get", "got",
+            "gets", "do", "did", "doing", "done", "i", "me", "my", "we", "us",
+            "you", "yours", "they", "them", "he", "him", "his", "she", "her",
+            "it", "its", "or", "so", "if", "as", "by", "at", "an", "a", "all",
+            "any", "some", "be", "been", "being", "on", "to", "in", "of", "per",
+            "across", "between", "over", "under", "via"
+        }
         terms = [term for term in re.findall(r"[\w][\w'-]{1,}", query.lower()) if term not in stop_words]
         return list(dict.fromkeys(terms[:16]))
 
@@ -391,18 +547,59 @@ class Database:
         if not terms:
             return 0.0
         haystack = " ".join(str(item.get(key, "")) for key in ("title", "heading_path", "content")).lower()
-        return sum(1 for term in terms if re.search(rf"(?<![\w'-]){re.escape(term)}(?![\w'-])", haystack)) / len(terms)
+        matched = 0
+        for term in terms:
+            parts = [p for p in re.findall(r"[a-zA-Z0-9_]+", term) if len(p) >= 2]
+            stem = term.rstrip("s") if len(term) > 3 else term
+            synonyms = _QUERY_SYNONYMS.get(term, [])
+            if (
+                re.search(rf"(?<![\w'-]){re.escape(term)}(?![\w'-])", haystack)
+                or (stem and re.search(rf"(?<![\w'-]){re.escape(stem)}", haystack))
+                or (parts and all(re.search(rf"(?<![\w'-]){re.escape(p)}", haystack) for p in parts))
+                or (synonyms and any(re.search(rf"(?<![\w'-]){re.escape(syn)}", haystack) for syn in synonyms))
+            ):
+                matched += 1
+        return matched / len(terms)
 
-    def search_hybrid_knowledge(self, crawl_id: str, query: str, limit: int = 6, embedder: EmbeddingProvider | None = None) -> list[dict[str, Any]]:
-        """Fuse FTS5 and cosine retrieval using reciprocal-rank fusion."""
-        lexical = self.search_knowledge(crawl_id, query, max(limit * 3, 12))
+    def search_hybrid_knowledge(
+        self,
+        crawl_id: str,
+        query: str,
+        limit: int = 6,
+        embedder: EmbeddingProvider | None = None,
+        query_type: str = "general",
+        ablation_mode: str = "full",
+    ) -> list[dict[str, Any]]:
+        """Fuse FTS5 BM25 and dense vector retrieval with query-adaptive RRF, reranking, and ablation modes."""
+        lexical = self.search_knowledge(crawl_id, query, max(limit * 4, 16))
         lexical_rank = {int(item["id"]): position for position, item in enumerate(lexical, start=1)}
         query_terms = self._query_terms(query)
+        clean_query = " ".join(query.lower().split())
         active_embedder = embedder or HashEmbeddingProvider()
         query_vector = active_embedder.embed(query)
+
+        # 1. Lexical-only ablation
+        if ablation_mode == "lexical_only":
+            selected = []
+            for item in lexical[:limit]:
+                enriched = dict(
+                    item,
+                    hybrid_score=round(float(item.get("rank", 0.0)), 4),
+                    term_coverage=round(self._coverage(item, query_terms), 2),
+                    retrieval_mode="lexical_only",
+                    semantic_first=False,
+                    semantic_score=0.0,
+                    lexical_match=True,
+                )
+                selected.append(enriched)
+            return selected
+
         with self.connect() as conn:
             rows = conn.execute(
-                """SELECT k.id, k.page_id, k.url, k.title, k.heading_path, k.content, v.embedding
+                """SELECT k.id, k.page_id, k.crawl_id, k.url, k.canonical_url, k.title, k.section,
+                          k.heading_path, k.heading_path_json, k.content_type, k.source_type,
+                          k.crawl_timestamp, k.parent_url, k.depth, k.content_hash, k.content, k.chunk_index,
+                          v.embedding
                    FROM vector_embeddings v JOIN knowledge_chunks k ON k.id = v.chunk_id
                    WHERE v.crawl_id = ? AND v.provider = ? AND v.dimension = ?""",
                 (crawl_id, active_embedder.name, len(query_vector)),
@@ -410,53 +607,193 @@ class Database:
         vector_candidates = []
         for row in rows:
             similarity = cosine_similarity(query_vector, array("f", row["embedding"]))
-            # Hash vectors are a deterministic lexical fallback, not semantic understanding.
-            # They must never introduce vector-only candidates through collisions.
             if active_embedder.name == "hash":
                 continue
-            if similarity < 0.38:
+            if similarity < 0.35:
                 continue
             item = dict(row)
             item.pop("embedding", None)
+            if "heading_path_json" in item and item["heading_path_json"]:
+                try:
+                    item["heading_path_list"] = json.loads(item["heading_path_json"])
+                except Exception:
+                    item["heading_path_list"] = [item.get("heading_path", "")]
             item["vector_similarity"] = similarity
             vector_candidates.append((item, similarity))
         vector_ranked = sorted(vector_candidates, key=lambda item: item[1], reverse=True)
         vector_rank = {int(item[0]["id"]): position for position, item in enumerate(vector_ranked, start=1)}
+
+        # 2. Vector-only ablation
+        if ablation_mode == "vector_only":
+            selected = []
+            for item, sim in vector_ranked[:limit]:
+                enriched = dict(
+                    item,
+                    hybrid_score=round(sim, 4),
+                    term_coverage=round(self._coverage(item, query_terms), 2),
+                    retrieval_mode="vector_only",
+                    semantic_first=True,
+                    semantic_score=sim,
+                    lexical_match=int(item["id"]) in lexical_rank,
+                )
+                selected.append(enriched)
+            return selected
+
+        # 3. Exact-only ablation
+        if ablation_mode == "exact_only":
+            selected = []
+            for item in lexical:
+                content_lower = str(item.get("content", "")).lower()
+                title_lower = str(item.get("title", "")).lower()
+                if clean_query and (clean_query in content_lower or clean_query in title_lower):
+                    enriched = dict(
+                        item,
+                        hybrid_score=1.0,
+                        term_coverage=1.0,
+                        retrieval_mode="exact_only",
+                        semantic_first=False,
+                        semantic_score=0.0,
+                        lexical_match=True,
+                    )
+                    selected.append(enriched)
+                    if len(selected) >= limit:
+                        break
+            return selected
+
         candidates = {int(item["id"]): item for item in lexical}
         candidates.update({int(item[0]["id"]): item[0] for item in vector_ranked})
+
+        # Adaptive RRF weights based on query type
+        if query_type in {"exact_phrase", "identifier_lookup"}:
+            w_lex, w_vec = 0.85, 0.15
+        elif query_type in {"numerical_structured", "numerical_query"}:
+            w_lex, w_vec = 0.55, 0.45
+        else:
+            w_lex, w_vec = 0.35, 0.65
+
         scored = []
         for chunk_id, item in candidates.items():
             coverage = self._coverage(item, query_terms)
-            if coverage <= 0 and float(item.get("vector_similarity", 0.0)) < 0.38:
-                continue
-            lexical_score = 1 / (60 + lexical_rank[chunk_id]) if chunk_id in lexical_rank else 0
             vector_similarity = float(item.get("vector_similarity", 0.0))
-            vector_score = vector_similarity if chunk_id in vector_rank else 0
-            # Dense similarity carries the semantic decision; lexical coverage and FTS rank refine it.
-            score = (0.72 * vector_score) + (0.20 * coverage) + (0.08 * lexical_score)
-            scored.append((score, coverage, item))
-        scored.sort(key=lambda item: (-item[0], -item[1], str(item[2].get("url", "")), int(item[2].get("chunk_index", 0))))
-        return [dict(item, hybrid_score=score, term_coverage=coverage, retrieval_mode="hybrid", semantic_first=True, semantic_score=float(item.get("vector_similarity", 0.0)), lexical_match=item.get("id") in lexical_rank) for score, coverage, item in scored[: max(1, min(limit, 20))]]
+            if coverage <= 0 and vector_similarity < 0.35 and chunk_id not in lexical_rank:
+                continue
+
+            # Reciprocal Rank Fusion component
+            lex_rrf = (1.0 / (60 + lexical_rank[chunk_id])) if chunk_id in lexical_rank else 0.0
+            vec_rrf = (1.0 / (60 + vector_rank[chunk_id])) if chunk_id in vector_rank else 0.0
+            rrf_score = (w_lex * lex_rrf) + (w_vec * vec_rrf)
+
+            if ablation_mode == "hybrid_raw":
+                total_score = rrf_score * 40.0
+                scored.append((total_score, coverage, item))
+                continue
+
+            # Exact phrase match bonus and identifier boost
+            content_lower = item.get("content", "").lower()
+            title_lower = item.get("title", "").lower()
+            phrase_bonus = 0.0
+            if clean_query and (clean_query in content_lower or clean_query in title_lower):
+                phrase_bonus = 0.35
+            for term in query_terms:
+                if len(term) >= 4 and (term in content_lower or term in title_lower):
+                    if re.search(r"^[a-z0-9]+[._-][a-z0-9._-]+$", term):
+                        phrase_bonus += 0.25
+
+            if ablation_mode == "hybrid_rerank":
+                total_score = (rrf_score * 40.0) + (coverage * 0.25) + (vector_similarity * 0.25) + phrase_bonus
+                scored.append((total_score, coverage, item))
+                continue
+
+            # Full mode includes metadata: source quality, structured bonus, heading relevance
+            src_type = item.get("source_type", "html_page")
+            source_bonus = 0.0
+            if src_type == "official_api":
+                source_bonus = 0.12
+            elif src_type == "documentation":
+                source_bonus = 0.10
+            elif src_type == "landing_page":
+                source_bonus = 0.04
+
+            # Structured/numerical content bonus for numerical queries
+            structured_bonus = 0.0
+            if query_type in {"numerical_structured", "numerical_query"} and ("field =" in content_lower or re.search(r"\b\d+\b", content_lower)):
+                structured_bonus = 0.15
+
+            # Heading path relevance
+            heading_bonus = 0.0
+            if any(term in item.get("heading_path", "").lower() for term in query_terms):
+                heading_bonus = 0.08
+
+            total_score = (rrf_score * 40.0) + (coverage * 0.25) + (vector_similarity * 0.25) + source_bonus + phrase_bonus + structured_bonus + heading_bonus
+            scored.append((total_score, coverage, item))
+
+        scored.sort(key=lambda x: (-x[0], -x[1], str(x[2].get("url", "")), int(x[2].get("chunk_index", 0))))
+
+        # Source diversity: avoid more than 2 passages from same URL unless needed
+        target_limit = max(1, min(limit, 20))
+        selected = []
+        per_url: dict[str, int] = {}
+        for score, coverage, item in scored:
+            u = str(item.get("url", ""))
+            if ablation_mode in {"full", "hybrid_rerank_metadata"} and per_url.get(u, 0) >= 2 and len(selected) < target_limit and len(scored) > target_limit:
+                continue
+            per_url[u] = per_url.get(u, 0) + 1
+            enriched = dict(
+                item,
+                hybrid_score=round(score, 4),
+                term_coverage=round(coverage, 2),
+                retrieval_mode="hybrid" if ablation_mode == "full" else ablation_mode,
+                semantic_first=True,
+                semantic_score=float(item.get("vector_similarity", 0.0)),
+                lexical_match=item.get("id") in lexical_rank,
+            )
+            selected.append(enriched)
+            if len(selected) >= target_limit:
+                break
+        return selected
 
     def search_knowledge(self, crawl_id: str, query: str, limit: int = 6) -> list[dict[str, Any]]:
         """Search only one crawl and return ranked passages with verifiable provenance."""
         terms = self._query_terms(query)
-        if not terms:
+        expanded_terms = list(terms)
+        for t in terms:
+            stem = re.sub(r"(?:ation|tion|sion|ment|able|ible|ness|ity|ive|ize|ise|ing|ed|es|s)$", "", t)
+            if len(stem) >= 3 and stem != t:
+                expanded_terms.append(stem)
+            if t in _QUERY_SYNONYMS:
+                expanded_terms.extend(_QUERY_SYNONYMS[t])
+
+        clean_terms: list[str] = []
+        for term in expanded_terms:
+            parts = [p for p in re.findall(r"[a-zA-Z0-9_]+", term) if len(p) >= 2]
+            if parts:
+                clean_terms.extend(parts)
+            whole = re.sub(r"[^a-zA-Z0-9_]", "", term)
+            if whole and whole not in clean_terms:
+                clean_terms.append(whole)
+        if not clean_terms:
             return []
-        match_query = " OR ".join(f'"{term.replace(chr(34), "")}"' for term in terms[:12])
+        match_query = " OR ".join(f"{term}*" for term in list(dict.fromkeys(clean_terms))[:24])
         with self.connect() as conn:
             rows = conn.execute(
-                """SELECT k.id, k.page_id, k.url, k.title, k.heading_path, k.content,
+                """SELECT k.id, k.page_id, k.crawl_id, k.url, k.canonical_url, k.title, k.section,
+                          k.heading_path, k.heading_path_json, k.content_type, k.source_type,
+                          k.crawl_timestamp, k.parent_url, k.depth, k.content_hash, k.content, k.chunk_index,
                           bm25(knowledge_fts) AS rank
                    FROM knowledge_fts f
                    JOIN knowledge_chunks k ON k.id = f.chunk_id
                    WHERE f.crawl_id = ? AND knowledge_fts MATCH ?
                    ORDER BY rank LIMIT ?""",
-                (crawl_id, match_query, max(1, min(limit, 20))),
+                (crawl_id, match_query, max(1, min(limit, 30))),
             ).fetchall()
         results: list[dict[str, Any]] = []
         for row in rows:
             item = dict(row)
+            if "heading_path_json" in item and item["heading_path_json"]:
+                try:
+                    item["heading_path_list"] = json.loads(item["heading_path_json"])
+                except Exception:
+                    item["heading_path_list"] = [item.get("heading_path", "")]
             coverage = self._coverage(item, terms)
             if coverage > 0:
                 item["term_coverage"] = coverage
@@ -486,4 +823,6 @@ class Database:
             page[key.removesuffix("_json")] = json.loads(page.pop(key))
         page["robots_allowed"] = bool(page["robots_allowed"])
         page["body_truncated"] = bool(page["body_truncated"])
+        page["is_duplicate"] = bool(page.get("is_duplicate", 0))
         return page
+

@@ -62,7 +62,15 @@ Completed crawls of the same normalized start URL can also be compared locally. 
 
 Completed crawls build a local knowledge index from readable HTML blocks, text resources, and text-layer PDFs. Each passage retains crawl, page, URL, title, heading path, chunk position, and embedding-provider/model identity. The default configuration uses a real local Sentence Transformers encoder (`sentence-transformers/all-MiniLM-L6-v2`) with normalized dense vectors; the deterministic hash provider is available only when `SPIDER_ALLOW_HASH_EMBEDDING=true` is explicitly set. Hash vectors are an offline lexical fallback, not semantic understanding.
 
-The retrieval pipeline is dense-first rather than keyword-first. It expands candidates through semantic vector similarity, uses FTS5 as an exact-term complement, calibrates both signals, preserves source diversity, and applies bounded query decomposition for multi-part questions. Structure-aware chunks retain heading provenance and use bounded overlap to avoid losing facts at chunk boundaries. The answer layer filters weak evidence, validates every generated citation against the supplied evidence set, and abstains when the crawl cannot support the question. The **Rebuild local index** action can recover an older crawl after parser, chunker, or embedding-model changes; rebuilding is required after changing the embedding model so all vectors share one provider/model identity.
+The retrieval pipeline is dense-first rather than keyword-first. It expands candidates through semantic vector similarity, uses FTS5 as an exact-term complement, calibrates both signals, preserves source diversity, and applies bounded query decomposition for multi-part questions. Structure-aware chunks retain heading provenance and use bounded overlap to avoid losing facts at chunk boundaries. 
+
+### Real semantic search (not raw similarity)
+
+Raw cosine similarity is never treated as proof of answer correctness. Vector similarity measures topical proximity in an embedding space, which can easily rank topically related passages that contain no factual answer to the operator's question. The question-answering pipeline implements true semantic search:
+- **Intent & Target-Type Parsing**: Classifies query semantic requirements (`quantity_cost`, `temporal_duration`, `condition_eligibility`, `procedure_method`, `entity_identity`, `location`, `definition_offering`, or `general`) and required named entities.
+- **Semantic Answerability Evaluation**: Candidate passages are inspected to ensure they provide actual answer support matching the query target (e.g. numeric prices, durations, conditions) and ground the requested entities. Non-answer-bearing passages are filtered out.
+- **Calibrated Confidence**: Confidence scores are never computed from raw geometric vector cosine similarities. Confidence is strictly calibrated from evidence semantic support, entity grounding, lack of contradictory evidence, and claim verification status (abstaining with `0.0` confidence when evidence is absent or non-answer-bearing).
+- The **Rebuild local index** action can recover an older crawl after parser, chunker, or embedding-model changes; rebuilding is required after changing the embedding model so all vectors share one provider/model identity.
 
 A read-only JSON endpoint is also available for local workflow experiments:
 
@@ -70,7 +78,7 @@ A read-only JSON endpoint is also available for local workflow experiments:
 GET /api/crawls/<crawl-id>/ask?q=your+question
 ```
 
-The endpoint is scoped to one completed crawl and returns the question, grounded status, answer text, and citations. It is intentionally read-only; it cannot start crawls, submit forms to target websites, change production content, or access another crawl's evidence.
+The endpoint is scoped to one completed crawl and returns the question, grounded status, answer text, confidence, verified claims breakdown, claim grounding rate, and citations. It is intentionally read-only; it cannot start crawls, submit forms to target websites, change production content, or access another crawl's evidence.
 
 ## Future automation boundary
 
@@ -86,7 +94,17 @@ A minimal workflow definition is:
 
 The knowledge layer is also designed so an external n8n instance can later call the existing read-only question endpoint or workflow API. n8n supports webhook triggers and API-style responses, but any future external integration must add explicit authentication, request validation, idempotency, local-network exposure controls, and operator approval. A local-only deployment should use loopback addresses and never forward crawl content to an untrusted workflow host.
 
-An optional final LLM synthesis layer is supported through a loopback-only Ollama-compatible endpoint. Set `SPIDER_ANSWER_PROVIDER=ollama`, configure the local model in `.env`, and install/run Ollama locally. The model receives only the selected evidence passages and must cite them as `[1]`, `[2]`, and so on; uncited or out-of-range citations are rejected and deterministic evidence output is returned instead. If the model is unavailable, retrieval still works and the answer falls back safely. Hosted models are not enabled by default because website passages would leave the machine.
+### Mandatory claim-level grounding & local synthesis
+
+An optional final LLM synthesis layer is supported through a loopback-only Ollama-compatible endpoint. Set `SPIDER_ANSWER_PROVIDER=ollama`, configure the local model in `.env`, and install/run Ollama locally. 
+
+When an LLM generates an answer, **mandatory claim-level grounding** verifies every factual statement:
+- The answer is decomposed into atomic sentences/claims with citation associations `[1]`, `[2]`.
+- Every empirical assertion must cite at least one retrieved evidence passage.
+- Every number, date, and named entity is verified against the cited passage to eliminate hallucinations.
+- If even one factual claim is uncited, introduces ungrounded entities, contradicts evidence, or hallucinates numbers, the generated answer is rejected and automatically replaced with deterministic, verbatim cited evidence quotes.
+- Both the HTMX UI and JSON API expose the full `claims` verification ledger and `claim_grounding_rate`.
+
 
 ## Architecture
 

@@ -41,3 +41,30 @@ def test_unsupported_binary_is_explicit() -> None:
     text, error = extract_document_text("application/octet-stream", b"binary")
     assert text == ""
     assert "No text extractor configured" in error
+
+
+def test_extract_json_semantics_nested_and_nulls() -> None:
+    import json
+    data = {
+        "total": 100,
+        "indicator": "NY.GDP.MKTP.CD",
+        "description": None,
+        "items": [
+            {"id": 1, "name": "Item 1", "active": True, "deleted_at": None},
+            {"id": 2, "name": "Item 2", "active": False, "deleted_at": "2026-01-01"},
+        ],
+        "metadata": {
+            "version": "1.0",
+            "environment": "production",
+            "deprecated": False,
+        },
+    }
+    payload = json.dumps(data).encode("utf-8")
+    text, error = extract_document_text("application/json", payload)
+    assert error == ""
+    assert "field = total, value = 100" in text
+    assert "NY.GDP.MKTP.CD" in text
+    assert "items[0]: id = 1 | name = Item 1 | active = True" in text
+    assert "items[1]: id = 2 | name = Item 2 | active = False" in text
+    assert "metadata.version = 1.0" in text
+    assert "metadata.environment = production" in text

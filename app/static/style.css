@@ -155,3 +155,21 @@ button:active,.button-link:active { transform:scale(.96); }
 .knowledge-empty .answer-label { color: #895015; }
 .knowledge-form .loading-inline { margin-top: 8px; }
 .knowledge-panel-meta .loading-inline { font-size: 12px; }
+
+.claims-section { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.claims-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.claims-header strong { font: 700 11px ui-monospace, monospace; letter-spacing: .06em; text-transform: uppercase; color: var(--spruce); }
+.grounding-badge { display: inline-block; padding: 2px 7px; border-radius: 2px; font: 700 9px ui-monospace, monospace; letter-spacing: .08em; text-transform: uppercase; }
+.grounding-badge.grounding-pass { color: var(--spruce); background: #d7e8d7; border: 1px solid #a8caa8; }
+.grounding-badge.grounding-fail { color: var(--brick); background: #fae9e6; border: 1px solid #e8b2ac; }
+.claims-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.claim-item { padding: 9px 12px; background: var(--white); border: 1px solid var(--line); border-left: 3px solid var(--spruce); display: grid; gap: 4px; }
+.claim-item.claim-ungrounded { border-left-color: var(--brick); background: #fffaf9; }
+.claim-body { display: flex; align-items: baseline; gap: 8px; }
+.claim-status-tag { flex: 0 0 auto; font: 700 9px ui-monospace, monospace; letter-spacing: .06em; }
+.claim-item.claim-grounded .claim-status-tag { color: var(--spruce); }
+.claim-item.claim-ungrounded .claim-status-tag { color: var(--brick); }
+.claim-text { font-size: 13px; color: var(--ink); line-height: 1.45; }
+.claim-meta { display: flex; flex-wrap: wrap; gap: 12px; font: 11px ui-monospace, monospace; color: var(--muted); }
+.claim-reason { color: var(--amber); }
+

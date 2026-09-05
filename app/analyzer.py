@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from hashlib import sha256
-from typing import Iterable
+from typing import Any, Iterable
 
 from app.parser import normalized_text
 from app.types import IssueRecord, LinkRecord, PageRecord
@@ -106,3 +106,40 @@ def analyze_pages(pages: Iterable[PageRecord], links: Iterable[LinkRecord], star
         if link.is_internal and link.target_url in broken_targets:
             issues.append(_issue("broken_internal_link", "high", "Broken internal link", link.source_url, f"Link target: {link.target_url}; anchor: {link.anchor_text or '(empty)'}", "Update or remove this link so it points to a successful, relevant destination."))
     return issues
+
+
+def compute_crawl_coverage_metrics(
+    pages: Iterable[PageRecord],
+    links: Iterable[LinkRecord],
+    discovered_urls: set[str] | None = None,
+) -> dict[str, Any]:
+    """Compute detailed crawl coverage, duplicate avoidance, and content distribution metrics."""
+    page_list = list(pages)
+    link_list = list(links)
+    crawled_urls = {p.url for p in page_list}
+    all_discovered = set(crawled_urls)
+    for link in link_list:
+        if link.target_url:
+            all_discovered.add(link.target_url)
+    if discovered_urls:
+        all_discovered |= discovered_urls
+
+    status_dist = Counter(str(p.status_code or "error") for p in page_list)
+    content_dist = Counter((p.content_type or "unknown").split(";")[0].strip().lower() for p in page_list)
+    duplicates = sum(1 for p in page_list if getattr(p, "is_duplicate", False))
+    api_endpoints = sum(1 for p in page_list if getattr(p, "source_type", "") == "official_api" or "json" in (p.content_type or "").lower())
+
+    words = [len(normalized_text(p.rendered_text).split()) for p in page_list if p.status_code == 200]
+    avg_words = round(sum(words) / len(words), 1) if words else 0.0
+    coverage_rate = len(crawled_urls) / len(all_discovered) if all_discovered else 1.0
+
+    return {
+        "total_crawled_urls": len(crawled_urls),
+        "total_discovered_urls": len(all_discovered),
+        "crawl_coverage_rate": round(coverage_rate, 2),
+        "status_code_distribution": dict(status_dist),
+        "content_type_distribution": dict(content_dist),
+        "duplicates_detected": duplicates,
+        "api_endpoints_indexed": api_endpoints,
+        "average_word_count": avg_words,
+    }

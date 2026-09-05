@@ -81,3 +81,82 @@ def test_answer_falls_back_when_local_generator_fails() -> None:
     assert answer["grounded"] is True
     assert answer["answer_mode"] == "evidence"
     assert "Audits are offered" in answer["answer"]
+
+
+def test_mandatory_claim_grounding_rejects_hallucinated_numbers() -> None:
+    passages = [{"url": "https://owned.example/", "heading_path": "Services", "content": "Audits take fourteen days to complete."}]
+    # LLM hallucinates 30 days instead of fourteen days
+    hallucinated = answer_question(
+        "crawl-1",
+        "How long do audits take?",
+        lambda *_: passages,
+        generator=lambda *_: "Audits take thirty days to complete [1].",
+    )
+    assert hallucinated["answer_mode"] == "evidence"
+    assert "fourteen days" in hallucinated["answer"]
+    assert "thirty days" not in hallucinated["answer"]
+
+
+def test_mandatory_claim_grounding_rejects_hallucinated_entities() -> None:
+    passages = [{"url": "https://owned.example/", "heading_path": "Services", "content": "Our audits inspect on-page HTML and metadata."}]
+    # LLM hallucinates backlink profiling and Google Ads
+    hallucinated = answer_question(
+        "crawl-1",
+        "What do audits inspect?",
+        lambda *_: passages,
+        generator=lambda *_: "Our audits inspect on-page HTML and provide backlink profiling with Google Ads integration [1].",
+    )
+    assert hallucinated["answer_mode"] == "evidence"
+    assert "on-page HTML" in hallucinated["answer"]
+    assert "backlink profiling" not in hallucinated["answer"]
+
+
+def test_mandatory_claim_grounding_rejects_uncited_factual_claims() -> None:
+    passages = [{"url": "https://owned.example/", "heading_path": "Services", "content": "Our audits inspect on-page HTML."}]
+    # Second claim is an uncited factual statement
+    mixed = answer_question(
+        "crawl-1",
+        "What do audits inspect?",
+        lambda *_: passages,
+        generator=lambda *_: "Our audits inspect on-page HTML [1]. We also guarantee first place search rankings.",
+    )
+    assert mixed["answer_mode"] == "evidence"
+    assert "first place search rankings" not in mixed["answer"]
+
+
+def test_mandatory_claim_grounding_accepts_and_annotates_verified_claims() -> None:
+    passages = [{"url": "https://owned.example/", "heading_path": "Refunds", "content": "Eligible customers can request a refund within fourteen days."}]
+    grounded_answer = answer_question(
+        "crawl-1",
+        "How long is the refund window?",
+        lambda *_: passages,
+        generator=lambda *_: "Eligible customers can request a refund within fourteen days [1].",
+    )
+    assert grounded_answer["answer_mode"] == "local-model"
+    assert grounded_answer["grounded"] is True
+    assert grounded_answer["claim_grounding_rate"] == 1.0
+    assert len(grounded_answer["claims"]) >= 1
+    assert grounded_answer["claims"][0]["grounded"] is True
+    assert grounded_answer["claims"][0]["citations"] == [1]
+
+
+def test_real_semantic_search_rejects_similarity_without_answer_support() -> None:
+    # A passage with high topical similarity to "support" but zero answer to "phone number"
+    passages = [{
+        "url": "https://owned.example/support",
+        "heading_path": "Support",
+        "content": "Our customer support team is available Monday through Friday to help all clients.",
+        "vector_similarity": 0.85,  # high similarity should NOT be treated as proof of answer!
+        "term_coverage": 0.40,
+    }]
+    result = answer_question(
+        "crawl-1",
+        "What is the customer support telephone number?",
+        lambda *_: passages,
+    )
+    # Real semantic search detects missing target (phone number) and abstains with zero confidence
+    assert result["grounded"] is False
+    assert result["confidence"] == 0.0
+    assert result["citations"] == []
+    assert "not find enough matching evidence" in result["answer"].lower()
+
