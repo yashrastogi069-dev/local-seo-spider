@@ -7,21 +7,30 @@
 ---
 
 ## 1. Active Phase & Subphase
-- **Active Phase**: PHASE 0 (Baseline & Forensic Audit / Operating System Initialization)
-- **Active Subphase**: Phase 0 Complete -> Establishing Core Integrity & Memory Layer
-- **Next Transition Phase**: PHASE 1 (Evaluation Integrity Formal Release Verification)
+- **Active Phase**: PHASE 1 COMPLETE / READY FOR PHASE 2 (Crawler Core)
+- **Active Subphase**: Phase 1 Certified Closed — Transitioning to Phase 2
+- **Baseline Git Checkpoint**: Commit `63746dd` (Tags: `pre-phase-1-evaluation-integrity`, `pre-phase-2`)
+- **Phase 1 Certification Checkpoint**: Pending commit & tag `phase-1-certified`
+- **Next Transition Phase**: PHASE 2 (Crawler Core) — UNLOCKED.
 
 ---
 
 ## 2. Current Objective
-Establish the Antigravity Engineering Operating System & Integrity Layer across `/docs/` and `/ops/`, ensuring full requirements traceability, evidence ledger accounting, security models, and session handoff mechanisms before proceeding to Phase 1/Phase 2 implementation.
+Phase 1 (Evaluation Integrity) successfully completed and certified:
+1. Reconciled the benchmark accounting contradiction (155 queries = 125 answerable + 30 unanswerable; 140 retrieval-scored + 15 near-miss overlap).
+2. Fixed 2 cross-split query leakages (`DEV-02` vs `JSON-03`, `NUM-10` vs `TEMP-01`).
+3. Discovered and eliminated hardcoded benchmark special case in `app/qa.py`.
+4. Codified zero contamination into automated test suite `tests/test_contamination.py` (3/3 passed).
+5. Produced all 13 Phase 1 report artifacts in `/reports/phase-1/`.
+6. Formally certified Phase 1 release gate as `PASSED`. Ready to begin Phase 2 upon user approval.
 
 ---
 
 ## 3. Current Status
 - **Phase 0 Status**: `PASSED`
-- **Phase 1 Evaluation Formulation & Metrics**: Code implemented and tests passing (8/8 math invariant tests, 155 frozen benchmark cases, 0.0433 Brier score, 0.0966 ECE).
-- **Test Suite Pass Rate**: **123 Passed, 2 Skipped, 0 Failed** across 23 test modules.
+- **Phase 1 Status**: `PASSED & CERTIFIED`
+- **Phase 2 Status**: `UNLOCKED (Ready to commence)`
+- **Current Test State**: 128 Passed, 2 Skipped, 0 Failed across 25 test modules.
 
 ---
 

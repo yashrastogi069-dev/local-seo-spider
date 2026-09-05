@@ -5,9 +5,9 @@ This document provides a detailed inventory of all 125 automated unit, integrati
 ---
 
 ## Overall Summary
-- **Total Test Files**: 23
-- **Total Test Cases**: 125
-- **Passed**: 123
+- **Total Test Files**: 25
+- **Total Test Cases**: 130
+- **Passed**: 128
 - **Skipped**: 2 (both gracefully skipped due to optional `sentence-transformers` dependency)
 - **Failed**: 0
 - **Pass Rate on Active Environment**: 100.0%
@@ -23,6 +23,8 @@ This document provides a detailed inventory of all 125 automated unit, integrati
 | [`tests/test_analyzer.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_analyzer.py) | Unit | 2 | PASSED | SEO audit rules, issue prioritization, crawl coverage metrics |
 | [`tests/test_answering.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_answering.py) | Unit | 11 | PASSED | LocalAnswerer, OllamaAnswerer, query type classification, prompt formatting |
 | [`tests/test_app_e2e.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_app_e2e.py) | E2E | 5 | PASSED | FastAPI endpoints, crawl lifecycle, HTML views, question answering |
+| [`tests/test_benchmark_accounting.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_benchmark_accounting.py) | Benchmark | 2 | PASSED | 155-query accounting reconciliation, ID uniqueness, 0 cross-split leakage |
+| [`tests/test_contamination.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_contamination.py) | Security | 3 | PASSED | Zero benchmark case IDs, queries, or target answers hardcoded in app/ |
 | [`tests/test_comparison.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_comparison.py) | Integration | 1 | PASSED | Crawl comparison and differential ledger calculation |
 | [`tests/test_concurrency.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_concurrency.py) | Integration | 3 | PASSED | Threaded static, async coroutine, and multiprocess static crawl execution |
 | [`tests/test_controls_and_exports.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_controls_and_exports.py) | Integration | 12 | PASSED | CSV/JSON exports, robots.txt exclusions, redirect hops limit, error logging |

@@ -18,7 +18,7 @@ from typing import Any, Sequence, Set
 
 def compute_recall_at_k(
     retrieved: Sequence[str],
-    relevant: Set[str],
+    relevant: Set[str] | Sequence[str],
     k: int,
 ) -> float:
     """Compute standard IR Recall@K = |Retrieved@K ∩ Relevant| / |Relevant|.
@@ -26,55 +26,59 @@ def compute_recall_at_k(
     Always strictly bounded in [0.0, 1.0].
     Returns 0.0 if relevant set is empty or k <= 0.
     """
-    if not relevant or k <= 0:
+    rel_set = set(relevant)
+    if not rel_set or k <= 0:
         return 0.0
     k_retrieved = set(retrieved[:k])
-    hits = len(k_retrieved & relevant)
-    return hits / len(relevant)
+    hits = len(k_retrieved & rel_set)
+    return hits / len(rel_set)
 
 
 def compute_hit_at_k(
     retrieved: Sequence[str],
-    relevant: Set[str],
+    relevant: Set[str] | Sequence[str],
     k: int,
 ) -> float:
     """Compute binary HitRate@K (Success@K) = 1.0 if any retrieved@K is relevant else 0.0."""
-    if not relevant or k <= 0:
+    rel_set = set(relevant)
+    if not rel_set or k <= 0:
         return 0.0
     k_retrieved = set(retrieved[:k])
-    return 1.0 if bool(k_retrieved & relevant) else 0.0
+    return 1.0 if bool(k_retrieved & rel_set) else 0.0
 
 
 def compute_precision_at_k(
     retrieved: Sequence[str],
-    relevant: Set[str],
+    relevant: Set[str] | Sequence[str],
     k: int,
 ) -> float:
     """Compute IR Precision@K = |Retrieved@K ∩ Relevant| / K.
 
     Always strictly bounded in [0.0, 1.0].
     """
-    if not relevant or k <= 0:
+    rel_set = set(relevant)
+    if not rel_set or k <= 0:
         return 0.0
     # Use unique retrieved in top k to avoid artificial inflation from duplicates
     k_retrieved = set(retrieved[:k])
-    hits = len(k_retrieved & relevant)
+    hits = len(k_retrieved & rel_set)
     return hits / float(k)
 
 
 def compute_reciprocal_rank(
     retrieved: Sequence[str],
-    relevant: Set[str],
+    relevant: Set[str] | Sequence[str],
 ) -> float:
     """Compute Reciprocal Rank = 1.0 / rank of first relevant item (1-indexed).
 
     Returns 0.0 if no relevant document was retrieved.
     Always strictly bounded in [0.0, 1.0].
     """
-    if not relevant:
+    rel_set = set(relevant)
+    if not rel_set:
         return 0.0
     for rank_idx, doc in enumerate(retrieved, start=1):
-        if doc in relevant:
+        if doc in rel_set:
             return 1.0 / rank_idx
     return 0.0
 
@@ -90,7 +94,7 @@ def compute_dcg(relevances: Sequence[float | int], k: int = 5) -> float:
 
 def compute_ndcg(
     retrieved: Sequence[str],
-    relevant: Set[str],
+    relevant: Set[str] | Sequence[str],
     k: int = 5,
 ) -> float:
     """Compute Normalized Discounted Cumulative Gain at rank K with binary relevance.
@@ -99,13 +103,14 @@ def compute_ndcg(
     Always strictly bounded in [0.0, 1.0].
     Returns 0.0 if relevant set is empty or k <= 0.
     """
-    if not relevant or k <= 0:
+    rel_set = set(relevant)
+    if not rel_set or k <= 0:
         return 0.0
 
     seen: set[str] = set()
     actual_rel: list[float] = []
     for doc in retrieved[:k]:
-        if doc in relevant and doc not in seen:
+        if doc in rel_set and doc not in seen:
             actual_rel.append(1.0)
             seen.add(doc)
         else:
@@ -113,7 +118,7 @@ def compute_ndcg(
 
     actual_dcg = compute_dcg(actual_rel, k)
 
-    ideal_rel = [1.0] * min(len(relevant), k)
+    ideal_rel = [1.0] * min(len(rel_set), k)
     ideal_dcg = compute_dcg(ideal_rel, k)
 
     if ideal_dcg <= 0.0:

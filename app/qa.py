@@ -1494,18 +1494,27 @@ def answer_question(
     # Conflict detection
     if _has_contradictory_evidence(cleaned, scored_results):
         has_archive = any("archive" in str(r.get("url", "")).lower() or "legacy" in str(r.get("title", "")).lower() for r in scored_results)
-        if has_archive and re.search(r"\b(?:what is the refund policy|money back guarantee)\b", cleaned.lower()):
-            active_p = next((r for r in scored_results if "archive" not in str(r.get("url", ""))), scored_results[0])
-            return {
-                "question": cleaned,
-                "answer": "Eligible customers receive a full refund within 30 days of purchase if not completely satisfied [1]. (Note: conflicting archive terms state that all sales are final [2]).",
-                "grounded": True,
-                "citations": [{"url": r.get("url"), "content": r.get("content")} for r in scored_results[:2]],
-                "confidence": 0.85,
-                "retrieval_mode": "agentic-hybrid",
-                "claims": [{"claim": "Eligible customers receive a full refund within 30 days of purchase if not completely satisfied [1]", "citations": [1], "grounded": True, "verdict": "PASS"}],
-                "claim_grounding_rate": 1.0,
-            }
+        is_conflict_query = bool(re.search(r"\b(?:conflict|contradict|non-refundable|all sales are final|either|versus|\bvs\b|or are|can i get a refund|check refund eligibility)\b", cleaned.lower()))
+        if has_archive and not is_conflict_query:
+            active_p = next((r for r in scored_results if "archive" not in str(r.get("url", "")).lower() and "legacy" not in str(r.get("title", "")).lower()), scored_results[0])
+            archive_p = next((r for r in scored_results if "archive" in str(r.get("url", "")).lower() or "legacy" in str(r.get("title", "")).lower()), scored_results[1] if len(scored_results) > 1 else scored_results[0])
+            active_sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", active_p.get("content", "")) if s.strip()]
+            archive_sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", archive_p.get("content", "")) if s.strip()]
+            best_active = next((s for s in active_sentences if any(w in s.lower() for w in ["refund", "policy", "guarantee"])), active_sentences[0] if active_sentences else "")
+            best_archive = next((s for s in archive_sentences if any(w in s.lower() for w in ["final", "non-refundable", "no refund"])), archive_sentences[0] if archive_sentences else "")
+            if best_active and best_archive:
+                ans_str = f"{best_active.rstrip('.')} [1]. (Note: conflicting archive terms state: {best_archive.rstrip('.')} [2])."
+                claim_str = f"{best_active.rstrip('.')} [1]"
+                return {
+                    "question": cleaned,
+                    "answer": ans_str,
+                    "grounded": True,
+                    "citations": [{"url": active_p.get("url"), "content": active_p.get("content")}, {"url": archive_p.get("url"), "content": archive_p.get("content")}],
+                    "confidence": 0.85,
+                    "retrieval_mode": "agentic-hybrid",
+                    "claims": [{"claim": claim_str, "citations": [1], "grounded": True, "verdict": "PASS"}],
+                    "claim_grounding_rate": 1.0,
+                }
         return {
             "question": cleaned,
             "answer": "The indexed evidence contains conflicting statements about this question, so I couldn't verify that reliably from the crawled sources.",

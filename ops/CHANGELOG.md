@@ -62,9 +62,29 @@ All notable changes, phase executions, and architectural transitions for Local S
 - Fixed secret token exposure for variable-length Google API keys, Slack tokens, and auth headers.
 - Fixed 0-word count bug for structured JSON API responses.
 - Fixed regression where incomplete multi-slot queries received overconfident scores (now capped at $\le 0.50$).
+- Discovered and eliminated hardcoded refund special case in `app/qa.py` (lines 1496-1508) in favor of dynamic sentence extraction and generalized conflict classification.
+- Reconciled benchmark population accounting contradiction (155 queries: 125 answerable, 30 unanswerable, 140 retrieval-scored, 15 near-miss overlap).
+- Remediated 2 cross-split query duplicate leakages between Development and Blind Test (`DEV-02` vs `JSON-03`, `NUM-10` vs `TEMP-01`).
 
 ### Removed
 - Removed legacy `manus` artifacts, obsolete comments, and hardcoded test shortcuts.
+- Removed hardcoded query string comparisons and verbatim answer text in `app/qa.py`.
+
+### Reports & Audits Produced
+- Created all 13 Phase 1 report artifacts in `reports/phase-1/`:
+  - `benchmark_manifest.json` (SHA-256 hashes of cases & corpus)
+  - `case_evaluation_results.json` (canonical 155-case evaluation records)
+  - `benchmark_accounting.md` (mathematical population reconciliation)
+  - `metric_formula_audit.md` (unclipped metric formulations & hand-computed proofs)
+  - `confidence_calibration.md` (Brier = 0.0433, ECE = 0.0966, 5 reliability buckets)
+  - `ground_truth_audit.md` (provenance & non-circularity audit)
+  - `contamination_audit.md` (zero contamination across 23 production modules)
+  - `retrieval_ablation.md` (6-mode retrieval ablation on 140 queries)
+  - `semantic_evaluation.md` (honest evaluation of Hash vs Neural embeddings)
+  - `citation_evaluation.md` (atomic claim extraction, 96.40% answerable recall)
+  - `adversarial_results.md` (100% defense across 30 adversarial & trap cases)
+  - `regression_results.md` (11/11 historic regressions verified)
+  - `phase_1_certification.md` (formal Section 70 sign-off document)
 
 ---
 

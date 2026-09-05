@@ -1,0 +1,25 @@
+{
+  "benchmark_name": "rag-benchmark-v1",
+  "benchmark_version": "1.1.0",
+  "total_cases": 155,
+  "split_counts": {
+    "development": 40,
+    "calibration": 25,
+    "blind_test": 40,
+    "regression": 20,
+    "adversarial": 30
+  },
+  "population_accounting": {
+    "total_cases": 155,
+    "answerable_cases": 125,
+    "unanswerable_cases": 30,
+    "retrieval_scored_cases": 140,
+    "pure_unanswerable_retrieval_cases": 15,
+    "overlap_near_miss_cases": 15
+  },
+  "hashes": {
+    "benchmark_cases_sha256": "4ec09d7977079c19057acc3e76632b4e61975f51ffa233d23580f27fc9368d27",
+    "corpus_data_sha256": "75708c793e29059123b3d8fcee416fbbf59bb51021ca163d42b7165738ec7374"
+  },
+  "created_at": "2026-09-05T13:00:00Z"
+}

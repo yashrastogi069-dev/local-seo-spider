@@ -16,9 +16,9 @@ All 125 automated tests pass (123 passed, 2 skipped solely due to the optional `
 ---
 
 ## 2. Active Phase Status
-- **Active Phase**: PHASE 0 (Baseline & Memory Architecture Initialization) -> Ready for Phase 1 Release Gate Sign-off.
-- **Active Subphase**: Operating System Initialization complete.
-- **Next Phase In Line**: PHASE 2 (Crawler Core).
+- **Active Phase**: PHASE 1 COMPLETE / CERTIFIED CLOSED.
+- **Active Subphase**: Phase 1 Release Gate Formally PASSED.
+- **Next Phase In Line**: PHASE 2 (Crawler Core) — Unlocked, awaiting user command to commence.
 
 ---
 
@@ -26,25 +26,28 @@ All 125 automated tests pass (123 passed, 2 skipped solely due to the optional `
 1. **Mathematical Invariant Rectification**:
    - Created `app/evaluation.py` implementing unclipped standard formulations for Recall@K, Precision@K, MRR, NDCG@K, Brier score, and ECE.
    - Fixed `app/database.py` crawl coverage denominator by taking the exact set union of crawled URLs and discovered links.
-2. **Decoupled Answer Planning**:
-   - Replaced legacy query-specific string matching in `app/qa.py` with generalized dynamic extractors (`_dynamic_extract_comparison`, `_dynamic_extract_collection_item`, `_dynamic_extract_slots`, `_dynamic_extract_phrase_match`, `_dynamic_extract_identifier_match`, `_dynamic_extract_multi_hop_answer`, `_dynamic_extract_semantic_answer`).
-3. **Adversarial Security Hardening**:
-   - Enhanced `app/urltools.py` with `parse_ip_literal` to decode octal, hex, dword, and IPv4-mapped IPv6 literals; blocked cloud metadata IPs (`169.254.169.254`, `100.100.100.200`, `metadata.google.internal`).
-   - Expanded secret redaction patterns to cover variable-length Google API keys, Bearer/JWT tokens, Slack tokens, and private keys.
-4. **Benchmark Expansion & Partitioning**:
-   - Expanded `tests/fixtures/benchmark_cases.py` to 155 frozen cases across 5 isolated splits (Development: 40, Calibration: 25, Blind Test: 40, Adversarial: 30, Regression: 20).
-5. **Operating System Layer Initialization**:
-   - Initialized `/docs/` and `/ops/` memory structures: `PROJECT_MASTER_SPEC.md`, `ARCHITECTURE.md`, `DECISIONS.md`, `REQUIREMENTS_TRACEABILITY.md`, `TEST_MATRIX.md`, `RELEASE_GATES.md`, `STATE.md`, `SESSION_HANDOFF.md`, `CHANGELOG.md`, `KNOWN_ISSUES.md`, `EVIDENCE_LEDGER.md`.
+2. **Decoupled Answer Planning & Zero Contamination**:
+   - Discovered and eliminated hardcoded special case in `app/qa.py` (lines 1496-1508) in favor of dynamic sentence extraction.
+   - Verified zero benchmark contamination across all 23 production modules in `app/`.
+   - Codified contamination resistance into `tests/test_contamination.py` (3/3 passed).
+3. **Population Accounting Reconciliation**:
+   - Reconciled benchmark population accounting: Total 155 queries = 125 answerable + 30 unanswerable; 140 retrieval-scored + 15 near-miss overlap.
+   - Fixed 2 cross-split query leakages (`DEV-02` vs `JSON-03`, `NUM-10` vs `TEMP-01`).
+   - Created `tests/test_benchmark_accounting.py` (2/2 passed).
+4. **Comprehensive Phase 1 Reports Produced**:
+   - Generated all 13 Phase 1 report artifacts in `reports/phase-1/` including canonical case results (`case_evaluation_results.json`), calibration, ablation, adversarial, citation, contamination, and the formal sign-off document (`phase_1_certification.md`).
+5. **Release Gate Status**:
+   - Phase 1 release gate is formally PASSED. Phase 2 (Crawler Core) is unlocked.
 
 ---
 
 ## 4. Test & Verification State
 - **Command**: `pytest`
-- **Total Tests**: 125
-- **Passed**: 123
+- **Total Tests**: 130
+- **Passed**: 128
 - **Failed**: 0
 - **Skipped**: 2 (both skipped gracefully with informative messages: `sentence-transformers` optional dependency not installed in this environment).
-- **Test Modules**: All 23 test files executed and verified.
+- **Test Modules**: All 25 test files executed and verified.
 
 ---
 
