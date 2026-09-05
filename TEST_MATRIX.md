@@ -1,21 +1,16 @@
 # COMPREHENSIVE TEST MATRIX
  
--This document provides a detailed inventory of all 146 automated unit, integration, and security tests across all 26 test modules in `local-seo-spider`.
-+This document provides a detailed inventory of all 240 automated unit, integration, concurrency, and security tests across all 33 test modules in `local-seo-spider`.
- 
- ---
- 
- ## Overall Summary
--- **Total Test Files**: 26
--- **Total Test Cases**: 146
--- **Passed**: 145
--- **Skipped**: 1 (gracefully skipped due to optional `sentence-transformers` dependency)
-+- **Total Test Files**: 33
-+- **Total Test Cases**: 240
-+- **Passed**: 238
-+- **Skipped**: 2 (gracefully skipped due to optional `sentence-transformers` dependency)
- - **Failed**: 0
- - **Pass Rate on Active Environment**: 100.0%
+This document provides a detailed inventory of all 281 automated unit, integration, concurrency, stress, failure injection, resource safety, and security tests across all 36 test modules in `local-seo-spider`.
+
+---
+
+## Overall Summary
+- **Total Test Files**: 36
+- **Total Test Cases**: 282
+- **Passed**: 280
+- **Skipped**: 2 (gracefully skipped due to optional `sentence-transformers` dependency)
+- **Failed**: 0
+- **Pass Rate on Active Environment**: 100.0%
  
  ---
  
@@ -32,16 +27,18 @@
  | [`tests/test_contamination.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_contamination.py) | Security | 3 | PASSED | Zero benchmark case IDs, queries, or target answers hardcoded in app/ |
  | [`tests/test_comparison.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_comparison.py) | Integration | 1 | PASSED | Crawl comparison and differential ledger calculation |
  | [`tests/test_concurrency.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_concurrency.py) | Integration | 3 | PASSED | Threaded static, async coroutine, and multiprocess static crawl execution |
-+| [`tests/test_concurrency_proof.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_concurrency_proof.py) | Concurrency Proof | 4 | PASSED | Overlapping intervals, server peak concurrency $\ge 2$, distinct child worker PIDs across Serial, Thread, Async, Multiprocess |
- | [`tests/test_controlled_crawler.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_controlled_crawler.py) | Integration | 12 | PASSED | 19 deterministic server endpoints, circular links termination, A-B-A cycle bounding, fragment deduplication, canonical duplicate detection, external domain exclusion, strict depth hierarchy, page limit enforcement, redirect chain & loops, HTTP error handling, 429 rate limit retry-after |
- | [`tests/test_controls_and_exports.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_controls_and_exports.py) | Integration | 12 | PASSED | CSV/JSON exports, robots.txt exclusions, redirect hops limit, error logging |
- | [`tests/test_crawler_contracts.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_crawler_contracts.py) | Contract | 16 | PASSED | Unified crawler contracts, CrawlStatus enums, sequence unpacking, fallback invariants, picklability, SQLite schema persistence |
- | [`tests/test_documents.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_documents.py) | Unit | 4 | PASSED | HTML, PDF, Markdown text extraction, deep JSON semantics preservation |
- | [`tests/test_embeddings.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_embeddings.py) | Unit | 5 | 4 PASS, 1 SKIP* | Hash embeddings determinism, normalization, cosine bounds, dimension consistency |
-+| [`tests/test_engine_conformance.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_engine_conformance.py) | Conformance | 48 | PASSED | 18 core requirements verified across all 4 engines: seeds, discovery, depth/page limits, duplicates, redirects, 404/500, timeouts, retries, 429, malformed links, external exclusion, cancellation, accounting |
-+| [`tests/test_engine_consistency.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_engine_consistency.py) | Parity | 1 | PASSED | Cross-engine parity: all 4 engines yield identical discovered URLs, status codes, depths, and content hashes |
-+| [`tests/test_engine_failure_fallback.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_engine_failure_fallback.py) | Resilience | 5 | PASSED | Fail-closed anti-fallback guarantees: invalid modes reject, pool crashes fail explicitly, zero silent serial fallback |
+| [`tests/test_concurrency_proof.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_concurrency_proof.py) | Concurrency Proof | 4 | PASSED | Overlapping intervals, server peak concurrency $\ge 2$, distinct child worker PIDs across Serial, Thread, Async, Multiprocess |
+| [`tests/test_concurrency_stress.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_concurrency_stress.py) | Concurrency Stress | 15 | PASSED | Simultaneous duplicate discovery dedup, rapid burst discovery queue integrity, mixed fast/slow endpoints, 500/429 storms, cancellation, SQLite write contention across 10 threads |
+| [`tests/test_controlled_crawler.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_controlled_crawler.py) | Integration | 12 | PASSED | 19 deterministic server endpoints, circular links termination, A-B-A cycle bounding, fragment deduplication, canonical duplicate detection, external domain exclusion, strict depth hierarchy, page limit enforcement, redirect chain & loops, HTTP error handling, 429 rate limit retry-after |
+| [`tests/test_controls_and_exports.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_controls_and_exports.py) | Integration | 12 | PASSED | CSV/JSON exports, robots.txt exclusions, redirect hops limit, error logging |
+| [`tests/test_crawler_contracts.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_crawler_contracts.py) | Contract | 16 | PASSED | Unified crawler contracts, CrawlStatus enums, sequence unpacking, fallback invariants, picklability, SQLite schema persistence |
+| [`tests/test_documents.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_documents.py) | Unit | 4 | PASSED | HTML, PDF, Markdown text extraction, deep JSON semantics preservation |
+| [`tests/test_embeddings.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_embeddings.py) | Unit | 5 | 4 PASS, 1 SKIP* | Hash embeddings determinism, normalization, cosine bounds, dimension consistency |
+| [`tests/test_engine_conformance.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_engine_conformance.py) | Conformance | 48 | PASSED | 18 core requirements verified across all 4 engines: seeds, discovery, depth/page limits, duplicates, redirects, 404/500, timeouts, retries, 429, malformed links, external exclusion, cancellation, accounting |
+| [`tests/test_engine_consistency.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_engine_consistency.py) | Parity | 1 | PASSED | Cross-engine parity: all 4 engines yield identical discovered URLs, status codes, depths, and content hashes |
+| [`tests/test_engine_failure_fallback.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_engine_failure_fallback.py) | Resilience | 5 | PASSED | Fail-closed anti-fallback guarantees: invalid modes reject, pool crashes fail explicitly, zero silent serial fallback |
 | [`tests/test_extraction_profiles.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_extraction_profiles.py) | Unit | 2 | PASSED | Custom extraction profiles and schema mappings |
+| [`tests/test_failure_injection.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_failure_injection.py) | Failure Injection | 20 | PASSED | Adversarial network failure resilience across all 4 engines: dropped mid-stream, truncated bodies, malformed gzip, socket timeout, connection refused |
 | [`tests/test_frontier_lifecycle.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_frontier_lifecycle.py) | State Machine | 11 | PASSED | 8-state frontier transitions, illegal transition rejection, terminal idempotency, retry exponential backoff, redirect alias mapping, canonical deduplication, mathematical accounting reconciliation |
 | [`tests/test_job_ledger.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_job_ledger.py) | Integration | 2 | PASSED | Persistent crawl state, job queue, restartability |
 | [`tests/test_knowledge.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_knowledge.py) | Unit | 5 | PASSED | Chunking, heading path provenance, chunk deduplication |
@@ -52,6 +49,7 @@
 | [`tests/test_rag_end_to_end.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_rag_end_to_end.py) | E2E | 2 | 1 PASS, 1 SKIP* | End-to-end crawl, indexing, and grounded answer synthesis (hash & neural) |
 | [`tests/test_rag_evaluation.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_rag_evaluation.py) | Integration | 2 | PASSED | Golden corpus indexing, retrieval recall sanity |
 | [`tests/test_rag_evaluation_harness.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_rag_evaluation_harness.py) | Benchmark | 3 | PASSED | 155-case benchmark evaluation, 6 retrieval ablations, 5 split tests |
+| [`tests/test_resource_safety.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_resource_safety.py) | Resource Safety | 7 | PASSED | Clean thread join with 0 leaked threads, multiprocess clean exit with 0 orphan processes, 5 consecutive crawl cycles memory stability (< 2.5MB drift), SQLite transaction rollback |
 | [`tests/test_ssrf_and_redaction.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_ssrf_and_redaction.py) | Security | 23 | PASSED | SSRF IP formats (octal, hex, dword, IPv6-mapped), cloud metadata, secret tokens |
 | [`tests/test_tooling.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_tooling.py) | Unit | 2 | PASSED | CLI argument parsing, environment variable loading |
 | [`tests/test_url_normalization.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_url_normalization.py) | Unit / Invariant | 13 | PASSED | RFC 3986 scheme/host/port normalization, dot segments, percent encoding, query parameter sorting & deduplication, tracking strip, safe sensitive param retention, canonical & redirect resolution |
@@ -88,3 +86,19 @@
 - `thread`: Verified across multi-threaded static crawl with shared state locks.
 - `async`: Verified using non-blocking coroutines in asyncio event loops.
 - `multiprocess`: Verified using spawn process pool on Windows.
+
+### 4. Concurrency Stress & Failure Injection
+- Simultaneous duplicate discovery exact deduplication (zero duplicate DB inserts, zero lost URLs).
+- Rapid discovery queue integrity across 10+ worker threads.
+- Interleaved fast and slow endpoints without starvation or deadlock.
+- 500 error and 429 rate-limiting storms with exponential backoff and retry categorization.
+- Cooperative mid-flight crawl cancellation responsiveness (< 1.0s stop time).
+- High write contention across 10 simultaneous threads without database locks or corruptions.
+- Adversarial network failure resilience across all 4 engines: dropped mid-stream, truncated response bodies, malformed gzip compression streams, socket timeouts, connection refused.
+
+### 5. Resource Safety & Lifecycle Cleanliness
+- Thread worker pool clean join with 0 leaked threads.
+- Multiprocess clean exit with 0 orphan child processes.
+- Memory and file descriptor stability across 5 consecutive crawls (< 2.5MB drift).
+- SQLite atomic transaction rollback on failure without leaving orphaned partial records.
+

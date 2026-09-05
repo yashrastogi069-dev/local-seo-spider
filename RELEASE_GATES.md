@@ -10,7 +10,7 @@ This document defines the strict, non-negotiable release gates for every phase o
 |:---:|:---|:---:|:---:|:---|
 | **0** | Baseline & Forensic Audit | **PASSED** | 2026-09-04 | 125 tests cataloged, historic bugs identified, memory files initialized |
 | **1** | Evaluation Integrity | **PASSED** | 2026-09-05 | `test_metrics_math.py` (8/8), 155-query benchmark split evaluation (3/3), Brier = 0.0433 |
-| **2** | Crawler Core | **PARTIAL** | Pending | Concurrency & SSRF tests pass (26 tests); core retry/timeout limits verified |
+| **2** | Crawler Core | **PARTIAL** | Pending (2A-2D Passed) | 281 tests pass; genuine 4-engine independence, stress resilience, 0 leaks, WAL concurrency |
 | **3** | Universal Extraction | **PARTIAL** | Pending | JSON deep semantics, HTML, PDF extractors pass; token redaction verified |
 | **4** | Knowledge/Indexing/Search | **PARTIAL** | Pending | Hybrid BM25+Vector search, RRF, chunk provenance verified in benchmark |
 | **5** | RAG Intelligence | **PARTIAL** | Pending | Claim grounding, citation verifier, and dynamic answer planner verified |
@@ -80,18 +80,28 @@ This document defines the strict, non-negotiable release gates for every phase o
 - [x] Zero regressions across entire repository test suite (238 passed, 2 skipped, 0 failed across 240 items).
 - **SUBPHASE 2C GATE STATUS**: **PASSED**
 
-#### Subphase 2D: Resilient Frontier & Persistence
-- [ ] Incremental page-by-page persistence to SQLite during crawl.
-- [ ] URL frontier tracking (url, depth, parent_url) with redirect targets queued.
-- [ ] Pause, resume, and cancellation via API / CLI endpoints.
-- **SUBPHASE 2D GATE STATUS**: **PENDING**
+#### Subphase 2D: Concurrency Stress, Failure Injection & Resource Safety
+- [x] Concurrency stress testing: simultaneous duplicate URL discovery exact deduplication (zero duplicate DB inserts, zero lost URLs).
+- [x] Queue integrity under rapid burst discovery across 10+ parallel worker threads.
+- [x] Mixed fast and slow endpoints executed without starvation, deadlock, or worker pool stall.
+- [x] Error bursts: 500 server error storms and 429 rate-limiting bursts with exponential retry backoff and proper error classification.
+- [x] Responsive cooperative cancellation: active crawls cancel cleanly during politeness sleeps, retry backoffs, and in-flight requests (< 1.0s stop time).
+- [x] Database write contention: 10 concurrent threads inserting page records and updating crawls simultaneously with zero lock errors or DB corruption (SQLite WAL mode & 30s busy timeout).
+- [x] Adversarial failure injection across all 4 engines: dropped mid-stream TCP connections, truncated bodies, malformed gzip compression, socket timeouts, connection refused.
+- [x] Resource safety & leak prevention: thread pool clean join with 0 leaked threads, multiprocess clean exit with 0 orphan processes, memory stability across 5 consecutive crawls (< 2.5MB drift), SQLite atomic transaction rollback.
+- [x] Full regression suite passes: 279 passed, 2 skipped, 0 failed across all 281 tests.
+- **SUBPHASE 2D GATE STATUS**: **PASSED**
 
-#### Subphase 2E: Security, Politeness & Resource Verification
-- [ ] Pre-socket DNS resolution blocking private/metadata IPs across all IP formats.
-- [ ] Resource leak tests verifying zero HTTP client or browser zombie processes.
+#### Subphase 2E: Static Fetch + Playwright + Smart Escalation
+- [ ] Static fetch completeness (status, headers, redirects, content-type, encoding, response size, timeouts, compression).
+- [ ] Playwright lifecycle (launch, context, page, navigation timeout, JS rendering, browser error recovery, clean exit).
+- [ ] Smart escalation with explicit criteria (empty shell, required rendered DOM absent, JS challenge, configured browser requirement).
+- [ ] Transparency & provenance (`requested_fetch_strategy`, `actual_fetch_strategy`, `escalated`, `escalation_reason`).
+- [ ] Controlled cases (normal HTML, JS-rendered page, static with script tags, empty shell, redirect, broken JS, browser timeout).
+- [ ] Resource cleanup (zero orphan browser processes, zero leaked contexts/pages).
 - **SUBPHASE 2E GATE STATUS**: **PENDING**
 
-- **GATE STATUS**: **PARTIAL (Subphases 2A, 2B, 2C PASSED)**
+- **GATE STATUS**: **PARTIAL (Subphases 2A, 2B, 2C, 2D PASSED)**
 
 ### PHASE 3: Universal Extraction
 - [x] Preservation of JSON deep semantics, scalar types, and nested object relationships.

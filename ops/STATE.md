@@ -1,6 +1,6 @@
 # OPERATIONAL STATE: PRIMARY SHORT-TERM MEMORY
 
-*Last Updated*: 2026-09-06T04:45:00+05:30  
+*Last Updated*: 2026-09-06T05:20:00+05:30  
 *Operating Mode*: Engineering Operating System & Integrity Layer  
 *Primary Source of Truth*: Executable Code (`app/`) & Automated Tests (`tests/`)
 
@@ -8,23 +8,28 @@
 
 ## 1. Active Phase & Subphase
 - **Active Phase**: PHASE 2 (Crawler Core)
-- **Active Subphase**: Phase 2D (Concurrency, Races, Failure & Resource Safety) — **KICKING OFF**
+- **Active Subphase**: Phase 2E (Static Fetch + Playwright + Smart Escalation) — **KICKING OFF**
 - **Completed Subphases**:
   - Phase 2A (Crawler Contracts + State Model) — **PASSED**
   - Phase 2B (URL Normalization + Frontier + Crawl Lifecycle) — **PASSED**
   - Phase 2C (Four Independent Crawler Engines) — **PASSED & CERTIFIED**
+  - Phase 2D (Concurrency Stress, Failure Injection & Resource Safety) — **PASSED & CERTIFIED**
 - **Baseline Git Checkpoints**:
   - `db7fc50` (Tags: `phase-1-certified`, `pre-phase-2-crawler-core`)
-  - Target commit for Phase 2C (Tag: `phase-2c-engine-independence`)
+  - `fdd59d9` (Tag: `phase-2c-engine-independence`)
+  - Target commit for Phase 2D (Tag: `phase-2d-concurrency-hardening`)
 - **Phase 1 Evaluation Baseline**: **FROZEN & TRUSTED** (Do NOT modify Phase 1 fixtures)
 
 ---
 
 ## 2. Current Objective
-Begin and execute **Phase 2D (Concurrency, Races, Failure & Resource Safety)**:
-1. Break the crawler under concurrent stress conditions (simultaneous duplicate discovery, worker exceptions, slow endpoints, 500/429 storms, SQLite contention, mid-crawl cancellation, shutdown during retry backoff).
-2. Detect and eliminate race conditions, duplicate DB inserts, lost URLs, deadlock, livelock, queue corruption, and premature termination.
-3. Verify resource safety (zero thread, socket, or process leaks across repeated crawls).
+Begin and execute **Phase 2E (Static Fetch + Playwright + Smart Escalation)**:
+1. Create a correct, observable fetch strategy honoring static vs Playwright execution.
+2. Verify static fetch completeness (status, headers, redirects, content-type, encoding, size, timeouts, compression, network errors).
+3. Verify Playwright lifecycle (launch, context, page, navigation timeout, redirects, JS rendering, error recovery, clean exit).
+4. Implement smart escalation with explicit criteria (empty shell, required DOM absent, JS challenge, configured browser requirement).
+5. Ensure transparency: requested mode, actual mode, escalation, reason, timing.
+6. Verify controlled cases without unnecessary Playwright escalation.
 
 ---
 
@@ -35,14 +40,15 @@ Begin and execute **Phase 2D (Concurrency, Races, Failure & Resource Safety)**:
   - **Subphase 2A Status**: `PASSED`
   - **Subphase 2B Status**: `PASSED`
   - **Subphase 2C Status**: `PASSED`
-  - **Subphase 2D Status**: `ACTIVE`
-- **Current Test State**: 238 Passed, 2 Skipped (due to optional `sentence-transformers`), 0 Failed across 33 test modules.
+  - **Subphase 2D Status**: `PASSED & CERTIFIED`
+  - **Subphase 2E Status**: `ACTIVE`
+- **Current Test State**: 279 Passed, 2 Skipped (due to optional `sentence-transformers`), 0 Failed across 36 test modules.
 
 ---
 
 ## 4. Last Verified Test State
 - **Command**: `pytest`
-- **Results**: 238 passed, 2 skipped, 0 failed in 232.12s across 33 test modules.
+- **Results**: 279 passed, 2 skipped, 0 failed in 210.71s across 36 test modules.
 - **Phase 2C Conformance & Concurrency Proof Suites**:
   - `tests/test_concurrency_proof.py`: 4/4 passed (Serial, Thread, Async, Multiprocess verified with overlapping intervals, server peak concurrency $\ge 2$, distinct child worker PIDs).
   - `tests/test_engine_conformance.py`: 48/48 passed (all 18 requirements verified across all 4 engines).

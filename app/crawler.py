@@ -177,20 +177,55 @@ class BaseCrawlerEngine:
                     pass
         return delay
 
-    def _fetch(self, client: httpx.Client, url: str) -> tuple[httpx.Response | None, list[dict[str, object]], str]:
+    @staticmethod
+    def _sleep_interruptible(duration: float, cancellation_token: CancellationToken | None = None) -> None:
+        if duration <= 0:
+            return
+        if not cancellation_token:
+            time.sleep(duration)
+            return
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            if cancellation_token.is_cancelled():
+                break
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+    @staticmethod
+    async def _async_sleep_interruptible(duration: float, cancellation_token: CancellationToken | None = None) -> None:
+        if duration <= 0:
+            return
+        if not cancellation_token:
+            await asyncio.sleep(duration)
+            return
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            if cancellation_token.is_cancelled():
+                break
+            await asyncio.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+    def _fetch(
+        self,
+        client: httpx.Client,
+        url: str,
+        cancellation_token: CancellationToken | None = None,
+    ) -> tuple[httpx.Response | None, list[dict[str, object]], str]:
         current = url
         hops: list[dict[str, object]] = []
         transient_statuses = {408, 425, 429, 500, 502, 503, 504}
         response: httpx.Response | None = None
         for _ in range(self.settings.max_redirects + 1):
+            if cancellation_token and cancellation_token.is_cancelled():
+                return None, hops, f"Request cancelled: {cancellation_token.reason or 'User cancelled'}"
             response = None
             for attempt in range(self.settings.max_request_retries + 1):
+                if cancellation_token and cancellation_token.is_cancelled():
+                    return None, hops, f"Request cancelled: {cancellation_token.reason or 'User cancelled'}"
                 try:
                     response = client.get(current, follow_redirects=False)
                 except httpx.HTTPError as exc:
                     if attempt >= self.settings.max_request_retries:
                         return None, hops, f"{type(exc).__name__} after {attempt + 1} attempt(s): {exc}"
-                    time.sleep(self.settings.retry_backoff_seconds * (2 ** attempt))
+                    self._sleep_interruptible(self.settings.retry_backoff_seconds * (2 ** attempt), cancellation_token)
                     continue
                 hops.append({
                     "url": current,
@@ -199,7 +234,7 @@ class BaseCrawlerEngine:
                     "attempt": attempt + 1,
                 })
                 if response.status_code in transient_statuses and attempt < self.settings.max_request_retries:
-                    time.sleep(self._retry_delay(response, attempt, self.settings.retry_backoff_seconds))
+                    self._sleep_interruptible(self._retry_delay(response, attempt, self.settings.retry_backoff_seconds), cancellation_token)
                     continue
                 break
             if response is None:
@@ -220,20 +255,29 @@ class BaseCrawlerEngine:
             return response, hops, ""
         return response, hops, f"Redirect limit ({self.settings.max_redirects}) exceeded."
 
-    async def _async_fetch(self, client: httpx.AsyncClient, url: str) -> tuple[httpx.Response | None, list[dict[str, object]], str]:
+    async def _async_fetch(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        cancellation_token: CancellationToken | None = None,
+    ) -> tuple[httpx.Response | None, list[dict[str, object]], str]:
         current = url
         hops: list[dict[str, object]] = []
         transient_statuses = {408, 425, 429, 500, 502, 503, 504}
         response: httpx.Response | None = None
         for _ in range(self.settings.max_redirects + 1):
+            if cancellation_token and cancellation_token.is_cancelled():
+                return None, hops, f"Request cancelled: {cancellation_token.reason or 'User cancelled'}"
             response = None
             for attempt in range(self.settings.max_request_retries + 1):
+                if cancellation_token and cancellation_token.is_cancelled():
+                    return None, hops, f"Request cancelled: {cancellation_token.reason or 'User cancelled'}"
                 try:
                     response = await client.get(current, follow_redirects=False)
                 except httpx.HTTPError as exc:
                     if attempt >= self.settings.max_request_retries:
                         return None, hops, f"{type(exc).__name__} after {attempt + 1} attempt(s): {exc}"
-                    await asyncio.sleep(self.settings.retry_backoff_seconds * (2 ** attempt))
+                    await self._async_sleep_interruptible(self.settings.retry_backoff_seconds * (2 ** attempt), cancellation_token)
                     continue
                 hops.append({
                     "url": current,
@@ -242,7 +286,7 @@ class BaseCrawlerEngine:
                     "attempt": attempt + 1,
                 })
                 if response.status_code in transient_statuses and attempt < self.settings.max_request_retries:
-                    await asyncio.sleep(self._retry_delay(response, attempt, self.settings.retry_backoff_seconds))
+                    await self._async_sleep_interruptible(self._retry_delay(response, attempt, self.settings.retry_backoff_seconds), cancellation_token)
                     continue
                 break
             if response is None:
@@ -262,6 +306,40 @@ class BaseCrawlerEngine:
                 return response, hops, f"Transient HTTP status {response.status_code} remained after {self.settings.max_request_retries + 1} attempt(s)."
             return response, hops, ""
         return response, hops, f"Redirect limit ({self.settings.max_redirects}) exceeded."
+
+    def _safe_fetch(
+        self,
+        client: httpx.Client,
+        url: str,
+        cancellation_token: CancellationToken | None = None,
+    ) -> tuple[httpx.Response | None, list[dict[str, object]], str]:
+        """Invoke _fetch handling both 3-arg (cancellation-aware) and legacy 2-arg monkeypatched fakes."""
+        import inspect
+        sig = inspect.signature(self._fetch)
+        params = list(sig.parameters.values())
+        if len(params) >= 3 or any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+            try:
+                return self._fetch(client, url, cancellation_token)
+            except TypeError:
+                return self._fetch(client, url)
+        return self._fetch(client, url)
+
+    async def _safe_async_fetch(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        cancellation_token: CancellationToken | None = None,
+    ) -> tuple[httpx.Response | None, list[dict[str, object]], str]:
+        """Invoke _async_fetch handling both 3-arg and legacy 2-arg monkeypatched fakes."""
+        import inspect
+        sig = inspect.signature(self._async_fetch)
+        params = list(sig.parameters.values())
+        if len(params) >= 3 or any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+            try:
+                return await self._async_fetch(client, url, cancellation_token)
+            except TypeError:
+                return await self._async_fetch(client, url)
+        return await self._async_fetch(client, url)
 
     @staticmethod
     def _response_payload(response: httpx.Response | None) -> tuple[int, dict[str, str], bytes, str] | None:
@@ -275,7 +353,7 @@ class BaseCrawlerEngine:
             "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json,application/xml,text/csv",
         }
         with httpx.Client(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
-            response, redirect_chain, fetch_error = self._fetch(client, url)
+            response, redirect_chain, fetch_error = self._safe_fetch(client, url)
             return url, self._response_payload(response), redirect_chain, fetch_error
 
     def _is_fetch_one_sync_overridden(self) -> bool:
@@ -688,10 +766,10 @@ class CrawlEngine(BaseCrawlerEngine):
 
                     pause = request.delay_seconds - (time.monotonic() - last_request_at)
                     if pause > 0:
-                        time.sleep(pause)
+                        self._sleep_interruptible(pause, cancellation_token)
 
                     t_start = time.monotonic()
-                    response, redirect_chain, fetch_error = self._fetch(client, url)
+                    response, redirect_chain, fetch_error = self._safe_fetch(client, url, cancellation_token)
                     t_end = time.monotonic()
                     last_request_at = time.monotonic()
 
@@ -768,7 +846,7 @@ class CrawlEngine(BaseCrawlerEngine):
                         status_code, resp_headers, content, final_url = payload
                         resp = httpx.Response(status_code, headers=resp_headers, content=content, request=httpx.Request("GET", final_url))
                     return target_url, resp, chain, err, t_start, t_end
-                resp, chain, err = self._fetch(client, target_url)
+                resp, chain, err = self._safe_fetch(client, target_url, cancellation_token)
                 t_end = time.monotonic()
                 return target_url, resp, chain, err, t_start, t_end
 
@@ -941,7 +1019,7 @@ class CrawlEngine(BaseCrawlerEngine):
             async def _async_worker_fetch(target_url: str) -> tuple[str, httpx.Response | None, list[dict[str, object]], str, float, float]:
                 await throttler.throttle(target_url)
                 t_start = time.monotonic()
-                resp, chain, err = await self._async_fetch(client, target_url)
+                resp, chain, err = await self._safe_async_fetch(client, target_url, cancellation_token)
                 t_end = time.monotonic()
                 return target_url, resp, chain, err, t_start, t_end
 
@@ -1079,6 +1157,7 @@ class CrawlEngine(BaseCrawlerEngine):
                 robots_status, start_time, started_at, cancellation_token,
             )
 
+        throttler = DomainPolitenessThrottler(request.delay_seconds)
         mp_context = multiprocessing.get_context("spawn")
         try:
             with concurrent.futures.ProcessPoolExecutor(max_workers=workers, mp_context=mp_context) as executor:
@@ -1098,6 +1177,8 @@ class CrawlEngine(BaseCrawlerEngine):
                             progress(len(pages), frontier.queue_size, robots_status)
                             continue
 
+                        throttler.throttle(entry.url)
+
                         task_dict = {
                             "url": entry.url,
                             "depth": entry.depth,
@@ -1108,7 +1189,7 @@ class CrawlEngine(BaseCrawlerEngine):
                             "max_retries": self.settings.max_request_retries,
                             "retry_backoff_seconds": self.settings.retry_backoff_seconds,
                             "max_redirects": self.settings.max_redirects,
-                            "delay_seconds": request.delay_seconds,
+                            "delay_seconds": 0.0,
                             "max_document_bytes": self.settings.max_document_bytes,
                             "allow_private": getattr(self.settings, "allow_private_crawls", False),
                         }

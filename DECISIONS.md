@@ -150,3 +150,35 @@ This document records the architectural and engineering decisions made for the L
      - Concurrency proofs verified in `tests/test_concurrency_proof.py` (overlapping execution intervals, server peak concurrency $\ge 2$, distinct child worker PIDs).
      - Anti-silent fallback verified in `tests/test_engine_failure_fallback.py`.
 - **Consequences**: Guarantees advertised concurrency models without fake wrappers, provides verifiable parallel performance, and ensures strict operational safety under network and process failures.
+
+---
+
+## ADR-012: Concurrency Stress Hardening, Failure Injection Resilience & Resource Safety
+- **Status**: ACCEPTED / VERIFIED
+- **Context**: High-concurrency crawlers under adverse network and operating system conditions face critical failure modes:
+  1. SQLite write contention (`sqlite3.OperationalError: database is locked`) when multiple parallel threads or processes write crawl updates simultaneously.
+  2. Race conditions during simultaneous duplicate URL discovery from parallel workers causing duplicate DB inserts or lost URLs.
+  3. Worker pool stalls or deadlocks during mid-flight cancellation when politeness sleeps or retry backoffs block the thread/coroutine loop.
+  4. Network failures (stream drops, truncated bodies, malformed gzip, socket read timeouts, connection refused) causing worker leaks, unhandled exceptions, or crawl hangs.
+  5. Descriptor, process, and thread leaks across consecutive crawls resulting in memory bloat and resource exhaustion.
+- **Decision**:
+  1. Database WAL & Busy Timeout Hardening (`app/database.py`):
+     - Configured SQLite connection busy timeout to 30.0 seconds (`PRAGMA busy_timeout = 30000;`).
+     - Configured SQLite journal mode to Write-Ahead Logging (`PRAGMA journal_mode = WAL;`) on initialization.
+     - Verified concurrent write safety across 10 simultaneous threads without database locks, duplicate inserts, or database corruption.
+  2. Interruptible Sleep & Responsive Cancellation (`app/crawler.py`):
+     - Implemented `_sleep_interruptible` and `_async_sleep_interruptible` checking `cancellation_token.is_cancelled()` in 50ms slices during politeness delays and retry backoff.
+     - Implemented `_safe_fetch` and `_safe_async_fetch` on `BaseCrawlerEngine` to inspect signature arity and safely support both cancellation-aware calls and legacy monkeypatched test stubs.
+  3. Adversarial Failure Injection Resilience (`tests/test_failure_injection.py`):
+     - Verified clean error handling across all 4 engines (Serial, Threaded, Coroutine, Multiprocess) for dropped mid-stream TCP connections, half-written response bodies, malformed gzip compression streams, read timeouts, and connection refused errors without crashing the crawl or hanging workers.
+  4. Concurrency Stress & Race Safety (`tests/test_concurrency_stress.py`):
+     - Verified exact set deduplication under simultaneous duplicate discovery from parallel workers (zero duplicate DB inserts, zero lost URLs).
+     - Verified queue integrity under rapid burst discovery across 10+ worker threads.
+     - Verified resilience under mixed fast/slow endpoints, 500 error storms, 429 rate-limiting storms, and cooperative mid-flight cancellation.
+  5. Resource Safety & Leak Prevention (`tests/test_resource_safety.py`):
+     - Verified Thread worker pool clean join with 0 leaked threads.
+     - Verified Multiprocess clean shutdown with 0 orphan child processes.
+     - Verified multi-crawl stability across 5 consecutive crawl cycles with bounded memory drift (< 2.5MB) and zero descriptor/connection leaks.
+     - Verified SQLite transaction rollback safety on simulated failure.
+- **Consequences**: Guarantees fail-closed zero-data-loss execution under extreme concurrency, eliminates database write lock contention, and guarantees clean resource reclamation across long-running crawler lifecycles.
+

@@ -309,6 +309,83 @@ class ControlledHandler(BaseHTTPRequestHandler):
 </body></html>"""
             self._send_html(200, body)
 
+        elif path == "/drop-mid-stream":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", "1000")
+            self.end_headers()
+            try:
+                self.wfile.write(b"<html><body><h1>Incomplete Stream")
+                self.wfile.flush()
+                self.request.shutdown(2)
+            except Exception:
+                pass
+            self.close_connection = True
+
+        elif path == "/half-written":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", "5000")
+            self.end_headers()
+            try:
+                self.wfile.write(b"<html><body><h1>Half Written Stream</h1>")
+                self.wfile.flush()
+                self.request.close()
+            except Exception:
+                pass
+            self.close_connection = True
+
+        elif path == "/malformed-gzip":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", "24")
+            self.end_headers()
+            self.wfile.write(b"NOT_A_VALID_GZIP_STREAM!")
+
+        elif path.startswith("/burst-500/"):
+            item_id = path.split("/")[-1]
+            self.send_response(500)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(f"500 Internal Error {item_id}".encode("utf-8"))
+
+        elif path.startswith("/burst-429/"):
+            item_id = path.split("/")[-1]
+            self.send_response(429)
+            self.send_header("Retry-After", "0.05")
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(f"429 Rate Limited {item_id}".encode("utf-8"))
+
+        elif path == "/rapid-discovery":
+            links = "".join(f'<a href="/rapid-target/{i}">Target {i}</a>\n' for i in range(25))
+            self._send_html(200, f"<html><body><h1>Discovery Hub</h1>{links}</body></html>")
+
+        elif path.startswith("/rapid-target/"):
+            item_id = path.split("/")[-1]
+            self._send_html(200, f"<html><body><h1>Target {item_id}</h1></body></html>")
+
+        elif path == "/simultaneous-duplicate-hub":
+            self._send_html(200, """<html><body><h1>Duplicate Hub</h1>
+    <a href="/dup-src-1">Source 1</a>
+    <a href="/dup-src-2">Source 2</a>
+    <a href="/dup-src-3">Source 3</a>
+    <a href="/dup-src-4">Source 4</a>
+</body></html>""")
+
+        elif path in ("/dup-src-1", "/dup-src-2", "/dup-src-3", "/dup-src-4"):
+            self._send_html(200, f"""<html><body><h1>Source {path}</h1><a href="/shared-duplicate-target">Shared Target</a></body></html>""")
+
+        elif path == "/shared-duplicate-target":
+            self._send_html(200, "<html><body><h1>Shared Target Page</h1></body></html>")
+
+        elif path.startswith("/slow-mixed/"):
+            is_slow = "slow" in path
+            delay = 0.25 if is_slow else 0.01
+            time.sleep(delay)
+            self._send_html(200, f"<html><body><h1>Mixed Delay Page {path}</h1></body></html>")
+
         else:
             self._send_text(404, f"404 Not Found: {path}", "text/plain")
 

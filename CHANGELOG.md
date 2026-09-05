@@ -4,7 +4,7 @@ All notable changes, phase executions, and architectural transitions for Local S
 
 ---
 
-## Current Status: Phases 0, 1, 2A, 2B, 2C Complete / Advancing to Subphase 2D
+## Current Status: Phases 0, 1, 2A, 2B, 2C, 2D Complete / Advancing to Subphase 2E
 
 ### Current Phase State:
 - **PHASE 0 (Baseline & Forensic Audit)**: COMPLETED / PASSED
@@ -13,14 +13,34 @@ All notable changes, phase executions, and architectural transitions for Local S
   - **Subphase 2A (Contracts & State Model)**: COMPLETED / PASSED
   - **Subphase 2B (URL Normalization + Frontier + Crawl Lifecycle)**: COMPLETED / PASSED
   - **Subphase 2C (Four Independent Concurrency Engines)**: COMPLETED / PASSED & CERTIFIED
-  - **Subphase 2D (Concurrency, Races, Failure & Resource Safety)**: ACTIVE
-  - **Subphase 2E (Static Fetch + Playwright + Smart Escalation)**: PENDING
+  - **Subphase 2D (Concurrency, Races, Failure & Resource Safety)**: COMPLETED / PASSED & CERTIFIED
+  - **Subphase 2E (Static Fetch + Playwright + Smart Escalation)**: ACTIVE
 - **PHASE 3 (Universal Extraction)**: PENDING
 - **PHASE 4 (Knowledge/Indexing/Search)**: PENDING
 - **PHASE 5 (RAG Intelligence)**: PENDING
 - **PHASE 6 (Web Intelligence)**: PENDING
 - **PHASE 7 (UI/UX)**: PENDING
 - **PHASE 8 (Final Certification)**: PENDING
+
+---
+
+## [Phase 2D: Concurrency Stress, Failure Injection & Resource Safety] - 2026-09-06
+
+### Added
+- Database concurrency hardening in `app/database.py`:
+  - Configured SQLite connection busy timeout to 30.0s (`PRAGMA busy_timeout = 30000;`).
+  - Enabled Write-Ahead Logging (`PRAGMA journal_mode = WAL;`) on initialization.
+  - Verified concurrent multi-threaded writes across 10 simultaneous threads without lock errors or corruptions.
+- Cooperative mid-flight cancellation & interruptible sleep in `app/crawler.py`:
+  - Implemented `_sleep_interruptible` and `_async_sleep_interruptible` checking `cancellation_token.is_cancelled()` in 50ms intervals during politeness pauses and exponential retry backoffs.
+  - Implemented `_safe_fetch` and `_safe_async_fetch` on `BaseCrawlerEngine` to transparently bridge cancellation tokens while supporting legacy 2-arg monkeypatched test stubs.
+- Controlled server stress endpoints in `tests/controlled_crawler_server.py`:
+  - Added endpoints for dropped mid-stream TCP connections, half-written response bodies, malformed gzip streams, 500 error storms, 429 rate-limiting bursts, rapid simultaneous discovery, and interleaved fast/slow responses.
+- Created 3 dedicated verification suites (41 tests):
+  - `tests/test_concurrency_stress.py` (15 tests): verified exact set deduplication under simultaneous duplicate discovery, rapid burst queue integrity, mixed fast/slow endpoints, 500/429 storms, cooperative cancellation (< 1.0s stop), and SQLite write contention.
+  - `tests/test_failure_injection.py` (20 tests): verified adversarial failure handling across all 4 engines for dropped connections, truncated streams, malformed gzip, socket timeouts, and connection refused.
+  - `tests/test_resource_safety.py` (6 tests): verified thread pool clean join with 0 leaked threads, multiprocess clean exit with 0 orphan processes, memory stability across 5 consecutive crawls (< 2.5MB drift), and SQLite transaction rollback.
+- Added ADR-012 to `DECISIONS.md`.
 
 ---
 
