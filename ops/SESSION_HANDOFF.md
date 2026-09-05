@@ -1,6 +1,6 @@
 # SESSION HANDOFF: ENGINEERING CONTINUITY RECORD
 
-*Date*: 2026-09-05T12:15:00+05:30  
+*Date*: 2026-09-05T18:15:00+05:30  
 *Handoff Author*: Principal Engineer & Independent QA Auditor  
 *Audience*: Incoming Senior / Staff Engineer continuing development on Local SEO Spider & Semantic RAG  
 
@@ -9,95 +9,79 @@
 ## 1. Context & Executive Summary
 This repository houses `local-seo-spider`, an enterprise semantic crawler and RAG engine with claim-level evidence grounding. The project operates under the **Antigravity Engineering Operating System & Integrity Layer** and a 9-phase master roadmap (Phase 0 through Phase 8).
 
-Phase 0 (Baseline & Forensic Audit) and Phase 1 (Evaluation Integrity) have been executed, hardened, and verified. All evaluation metrics have been stripped of artificial clipping (`min(metric, 1.0)` eliminated). The system achieves 99.2% factual correctness, 100.0% abstention accuracy, 0.0% benchmark hallucination rate, a Brier calibration score of 0.0433, and an ECE of 0.0966 across 155 frozen benchmark queries. 
+- Phase 0 (Baseline & Forensic Audit): COMPLETED & CERTIFIED.
+- Phase 1 (Evaluation Integrity): COMPLETED & CERTIFIED (Baseline permanently frozen at `db7fc50`).
+- Phase 2 (Crawler Core): ACTIVE.
+  - Subphase 2A (Crawler Contracts + State Model): COMPLETED & CERTIFIED.
+  - Subphase 2B (Engine Independence & Browser Integration): READY TO BEGIN.
 
-All 125 automated tests pass (123 passed, 2 skipped solely due to the optional `sentence-transformers` package).
+All 146 automated tests pass (145 passed, 1 skipped solely due to optional `sentence-transformers` package). Zero failures, zero regressions.
 
 ---
 
 ## 2. Active Phase Status
-- **Active Phase**: PHASE 2 (Crawler Core) — FORENSIC KICKOFF COMPLETED.
-- **Active Subphase**: Phase 2 Baseline Forensic Audit complete (No major implementation yet).
-- **Next Subphase In Line**: PHASE 2A (Engine Architecture & Contract Unification).
+- **Active Phase**: PHASE 2 (Crawler Core).
+- **Completed Subphase**: Subphase 2A (Crawler Contracts + State Model).
+  - All 16 contract unit tests pass (`tests/test_crawler_contracts.py`).
+  - Unified protocol `CrawlerEngineProtocol`, `CrawlResult` sequence unpacking, `CrawlStatus` enums, `FrontierItem` set hashability, `CancellationToken` IPC picklability, and SQLite schema provenance persistence verified.
+  - Fresh-Eyes subagent architecture review completed with 0 remaining P0/P1 issues.
+- **Next Subphase In Line**: SUBPHASE 2B (Engine Independence & Browser Integration).
 
 ---
 
-## 3. Work Completed in Current Cycle
-1. **Phase 2 Forensic Kickoff Executed**:
-   - Deep forensic reconstruction performed across all 4 crawler engines (`serial`, `thread`, `async`, `process`) and fetch strategies (`static`, `browser`).
-   - Cataloged critical architectural defects:
-     - `process` mode is pseudo-concurrent (sequential I/O in main thread).
-     - Concurrent modes silently bypass `render_enabled=True`.
-     - Fake Playwright test identified (`test_crawl_engine_playwright_rendering` bypassed `CrawlEngine.run()`).
-     - Permanent depth/parent amnesia (`depth=0`, `parent_url=""` on all pages).
-     - All-or-nothing in-memory persistence (loss on mid-crawl crash).
-     - No in-flight cancellation or pause support.
-     - HTTP client and event loop churn.
-     - DNS rebinding SSRF gap.
-2. **Phase 2 Requirements Defined**:
-   - Codified `REQ-CRAWL-001` through `REQ-CRAWL-016` in `docs/REQUIREMENTS_TRACEABILITY.md`.
-3. **Comprehensive Forensic Report Generated**:
-   - Created `reports/phase-2/phase_2_baseline_forensic_audit.md`.
-4. **Memory Files & Git Checkpoint Synchronized**:
-   - Tagged Git commit `db7fc50` as `pre-phase-2-crawler-core`.
-   - Updated `ops/STATE.md`, `ops/KNOWN_ISSUES.md`, `ops/CHANGELOG.md`, `docs/REQUIREMENTS_TRACEABILITY.md`.
+## 3. Work Completed in Subphase 2A
+1. **Core Types & Contracts Defined (`app/types.py`)**:
+   - `CrawlStatus`: Defined operational (`QUEUED`, `RUNNING`, `PAUSED`, `RETRYABLE`) and termination states (`SUCCESS`, `PARTIAL`, `FAILED`, `CANCELLED`, `BUDGET_EXHAUSTED`).
+   - `EngineMode` (`SERIAL`, `THREAD`, `ASYNC`, `PROCESS`) & `FetchMode` (`STATIC`, `BROWSER`).
+   - `CancellationToken`: Thread-safe cooperative cancellation with pickling support (`__getstate__`/`__setstate__`) for multiprocessing workers on Windows.
+   - `FrontierItem`: Value object with `(url, depth, parent_url, discovered_at, retry_count)` with explicit `__hash__` and `__eq__` for set deduplication.
+   - `PageRecord`: Extended with forensic provenance (`normalized_url`, `depth`, `parent_url`, `fetch_strategy`, `requested_fetch_strategy`, `actual_fetch_strategy`, `crawler_engine`, `response_bytes`, `duration_ms`, `error_category`, `headers`).
+   - `CrawlResult`: Complete crawl summary with automatic fallback detection in `__post_init__`, sequence unpacking (`pages, links, robots = result`), sequence indexing, and length.
+   - `CrawlerEngineProtocol`: Runtime checkable protocol matching `run(request, cancellation_token=...) -> CrawlResult`.
+2. **Crawler Integration (`app/crawler.py`)**:
+   - Updated `CrawlEngine.run()` and `_run_static_mode()` to return `CrawlResult`.
+   - Wired `cancellation_token` to queue loop; sets `CrawlStatus.CANCELLED` upon cancellation.
+   - Propagated engine and fetch strategy provenance into `PageRecord`.
+3. **Database Schema Migration & Persistence (`app/database.py`)**:
+   - Added automatic column migrations (`_ensure_page_columns`) for SQLite `pages` table.
+   - Updated `replace_pages_and_links` and `_page_row` to persist and retrieve all 7 new forensic fields.
+4. **Contract Verification (`tests/test_crawler_contracts.py`)**:
+   - 16/16 contract tests pass.
+   - Full regression suite passes (145 passed, 1 skipped).
+5. **Persistent Memory Synchronized**:
+   - Recorded ADR-009 in `DECISIONS.md`.
+   - Updated `TEST_MATRIX.md`, `RELEASE_GATES.md`, `CHANGELOG.md`, `REQUIREMENTS_TRACEABILITY.md`, and `ops/STATE.md`.
 
 ---
 
 ## 4. Test & Verification State
 - **Command**: `pytest`
-- **Total Tests**: 130
-- **Passed**: 128
+- **Total Tests**: 146
+- **Passed**: 145
 - **Failed**: 0
-- **Skipped**: 2 (both skipped gracefully with informative messages: `sentence-transformers` optional dependency not installed in this environment).
-- **Test Modules**: All 25 test files executed and verified.
+- **Skipped**: 1 (gracefully skipped: `sentence-transformers` optional package)
+- **Duration**: ~178s full suite, 4.79s contract suite.
 
 ---
 
-## 5. Architectural & Implementation Files Modified
-- `app/evaluation.py` (New module: unclipped evaluation metrics)
-- `app/qa.py` (Generalized dynamic synthesis, preserved sentence punctuation)
-- `app/urltools.py` (SSRF IP parser, secret token redaction)
-- `app/database.py` (Crawl coverage set union)
-- `tests/fixtures/benchmark_cases.py` (155 cases, 5 splits)
-- `tests/test_metrics_math.py` (8 hand-computed mathematical invariant tests)
-- `tests/test_ssrf_and_redaction.py` (23 adversarial security tests)
-- `tests/test_observed_regressions.py` (11 historic regression tests)
-- `tests/test_analyzer.py` (Crawl coverage bounds test)
-- `tests/test_embeddings.py` (Cosine bounds and dimensionality tests)
-- `tests/test_rag_end_to_end.py` (Hash provider companion e2e test)
-- `tests/test_documents.py` (Nested JSON semantics test)
+## 5. Architectural Invariants Preserved
+- **Sequence Compatibility**: Any legacy caller unpacking `pages, links, robots = engine.run(...)` continues to work identically.
+- **Multiprocessing / IPC**: All objects passed through frontier queues or returned from engines are picklable on Windows (`spawn`).
+- **Zero Silent Fallbacks**: If requested mode does not match actual mode, `CrawlResult.fallback_occurred` is `True` and `fallback_reason` is set.
+- **SQLite Provenance**: Mid-crawl forensic details are retained across DB saves and reloads.
 
 ---
 
-## 6. Known Regressions & Blockers
-- **Regressions**: None. All 11 historical failure modes pass.
-- **Blockers**: None.
-
----
-
-## 7. Decisions & Assumptions
-- **ADR-001**: Hybrid search combines SQLite FTS5 (BM25 lexical) with dense vectors using Reciprocal Rank Fusion (RRF, $k=60$).
-- **ADR-002**: Dynamic slot/comparison extraction replaces hardcoded query template branching in the answer planner.
-- **ADR-003**: Prohibition of metric clamping (`min(metric, 1.0)` eliminated across all evaluation code).
-- **ADR-004**: Multi-representation IP parsing decodes octal, hex, dword, and IPv4-mapped IPv6 literals for SSRF security.
-- **ADR-005**: 5-way benchmark partitioning guarantees isolated blind test evaluation without data leakage.
-- **Assumption**: Default offline testing operates with `HashEmbeddingProvider` (64-dim pseudo-random projections); production neural capability requires `sentence-transformers`.
-
----
-
-## 8. Database & Schema Invariants
-- SQLite schema: `crawls`, `pages`, `links`, `knowledge_chunks`, `knowledge_chunks_fts` (FTS5), `knowledge_vectors`.
-- All pages and chunks maintain complete provenance: `chunk_id`, `page_id`, `url`, `canonical_url`, `heading_path`, `content_hash`.
-
----
-
-## 9. Exact Next Steps for Next Session / Engineer
-1. Review `/ops/STATE.md` to confirm the active state.
-2. Formally close the Phase 1 release gate in `/docs/RELEASE_GATES.md`.
-3. Open **PHASE 2 (Crawler Core)** as the active phase in `/ops/STATE.md`.
-4. Implement Phase 2 specific objectives:
-   - Live network retry soak testing under simulated packet loss and high latency.
-   - Comprehensive DNS cache TTL and connection pool reuse optimization.
-   - URL frontier prioritizer (depth vs breadth, politeness domain queues).
-5. Run the Phase 2 test suite and record evidence in `/ops/EVIDENCE_LEDGER.md`.
+## 6. Exact Next Steps for Subphase 2B
+1. Stage and commit Phase 2A changes:
+   ```bash
+   git add app/ types.py app/crawler.py app/database.py tests/test_crawler_contracts.py docs/ ops/ CHANGELOG.md DECISIONS.md RELEASE_GATES.md TEST_MATRIX.md
+   git commit -m "feat(crawler): complete Phase 2A crawler contracts and state model"
+   git tag -a phase-2a-crawler-contracts -m "Phase 2A certified: crawler contracts and state model"
+   ```
+2. Execute Subphase 2B: Engine Independence & Browser Integration:
+   - Standalone `SerialCrawlerEngine` rewrite.
+   - Implement persistent HTTP client connection pool (`httpx.Client(transport=HTTPTransport(retries=3))`).
+   - Clean Playwright browser/page lifecycle (context per request/thread, explicit cleanup in `finally`).
+   - Eliminating silent fallback: When browser fails to launch or navigate, fail explicitly or record transparent fallback with `fallback_occurred=True` without silently degrading to static mode.
+   - Replace fake Playwright test `test_crawl_engine_playwright_rendering` with end-to-end live rendering test through `run()`.

@@ -4,12 +4,17 @@ All notable changes, phase executions, and architectural transitions for Local S
 
 ---
 
-## Current Status: Phase 0 & Phase 1 Complete / Transitioning to Phase 2
+## Current Status: Phase 0 & 1 Complete, Subphase 2A Complete / Transitioning to Subphase 2B
 
 ### Current Phase State:
 - **PHASE 0 (Baseline & Forensic Audit)**: COMPLETED / PASSED
 - **PHASE 1 (Evaluation Integrity)**: COMPLETED / PASSED
-- **PHASE 2 (Crawler Core)**: NEXT IN LINE
+- **PHASE 2 (Crawler Core)**: ACTIVE
+  - **Subphase 2A (Contracts & State Model)**: COMPLETED / PASSED
+  - **Subphase 2B (Engine Independence & Browser)**: NEXT IN LINE
+  - **Subphase 2C (Concurrency Engines)**: PENDING
+  - **Subphase 2D (Frontier & Persistence)**: PENDING
+  - **Subphase 2E (Security & Hardening)**: PENDING
 - **PHASE 3 (Universal Extraction)**: PENDING
 - **PHASE 4 (Knowledge/Indexing/Search)**: PENDING
 - **PHASE 5 (RAG Intelligence)**: PENDING
@@ -19,16 +24,29 @@ All notable changes, phase executions, and architectural transitions for Local S
 
 ---
 
-## [Unreleased] - 2026-09-05
+## [Phase 2A: Crawler Contracts + State Model] - 2026-09-05
 
-### Initialized Persistent Project Memory
-- Created `PROJECT_MASTER_SPEC.md`: Master specification covering all 9 phases, priority rules, and invariants.
-- Created `ARCHITECTURE.md`: Comprehensive system blueprint and modular interface definitions.
-- Created `DECISIONS.md`: Architectural decision records ADR-001 through ADR-008.
-- Created `CHANGELOG.md`: Chronological history and phase tracking.
-- Created `KNOWN_ISSUES.md`: Known operational constraints, dependency notes, and risks.
-- Created `TEST_MATRIX.md`: Exhaustive test inventory across all 125 test cases in 23 modules.
-- Created `RELEASE_GATES.md`: Strict gate criteria for all 9 phases.
+### Added
+- Created `tests/test_crawler_contracts.py` with 16 comprehensive unit tests verifying:
+  - `CrawlStatus` operational states (`QUEUED`, `RUNNING`, `PAUSED`, `RETRYABLE`) and termination states (`SUCCESS`, `PARTIAL`, `FAILED`, `CANCELLED`, `BUDGET_EXHAUSTED`).
+  - `EngineMode` (`SERIAL`, `THREAD`, `ASYNC`, `PROCESS`) and `FetchMode` (`STATIC`, `BROWSER`).
+  - `CrawlResult` dataclass with automatic fallback detection, sequence unpacking (`pages, links, robots = result`), indexing (`result[0]`), and `len(result) == 3`.
+  - `CancellationToken` cooperative thread-safe cancellation and IPC picklability for multiprocessing.
+  - `FrontierItem` value object with URL, depth, parent URL, retry count, set hashability, and IPC picklability.
+  - Runtime checkable `CrawlerEngineProtocol`.
+  - Database schema column extensions in SQLite with automatic migrations (`_ensure_page_columns`) and provenance persistence/retrieval.
+
+### Changed
+- Refactored `CrawlEngine.run()` and `_run_static_mode()` in `app/crawler.py` to return `CrawlResult` while maintaining 100% backward compatibility with 3-tuple sequence unpacking.
+- Connected `cancellation_token` to the crawler queue loop, transitioning status to `CrawlStatus.CANCELLED` with explicit reason when signalled.
+- Extended `PageRecord` in `app/types.py` and SQLite `pages` table schema in `app/database.py` with 7 forensic provenance fields: `normalized_url`, `depth`, `parent_url`, `fetch_strategy`, `requested_fetch_strategy`, `actual_fetch_strategy`, `crawler_engine`, `response_bytes`, `duration_ms`, `error_category`, `headers`.
+- Recorded ADR-009 in `DECISIONS.md` covering crawler contracts, sequence compatibility, and IPC picklability.
+
+### Verified
+- 16/16 contract tests pass (`tests/test_crawler_contracts.py`).
+- 145/145 full regression suite tests pass (1 skipped: optional `sentence-transformers`).
+- Fresh-eyes architecture review by subagent passed; all P0/P1 contract findings resolved.
+- Subphase 2A release gate PASSED.
 
 ---
 

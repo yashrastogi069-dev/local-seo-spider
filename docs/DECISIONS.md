@@ -87,3 +87,17 @@ This document records the architectural and engineering decisions made for the L
 - **Context**: Stripping trailing periods prior to appending citation brackets `[1]` converted `"Text."` to `"Text [1]."`, causing string assertion failures in downstream API tests.
 - **Decision**: Check if sentence ends in punctuation (`.`, `!`, `?`) and preserve it before appending the citation bracket: `f"{sentence} [{cit}]"`.
 - **Consequences**: Retains grammatically valid sentence structure and satisfies exact string contract tests.
+
+---
+
+## ADR-009: Unified Crawler Contracts, Sequence Compatibility, and IPC Picklability
+- **Status**: ACCEPTED / VERIFIED
+- **Context**: Prior to Phase 2, crawler engines returned bare 3-tuples `(pages, links, robots_disallowed)` without metadata, execution provenance, termination status, or fallback transparency. Legacy consumers across `app/main.py` and test harnesses unpacked results as 3-tuples. Furthermore, `multiprocessing` workers on Windows (`spawn`) require all items placed in queues to be picklable, while standard thread locks (`threading.Lock`) cannot be pickled.
+- **Decision**:
+  1. Define a standardized `CrawlResult` dataclass implementing `__iter__`, `__getitem__`, and `__len__` for seamless 3-tuple unpacking (`pages, links, robots = result`).
+  2. Implement automatic fallback detection in `CrawlResult.__post_init__` when requested fetch/engine modes diverge from actual execution.
+  3. Define 5 termination states (`SUCCESS`, `PARTIAL`, `FAILED`, `CANCELLED`, `BUDGET_EXHAUSTED`) and 4 operational states (`QUEUED`, `RUNNING`, `PAUSED`, `RETRYABLE`) in `CrawlStatus`.
+  4. Implement `CancellationToken` with custom `__getstate__` and `__setstate__` to allow IPC pickling across process boundaries while maintaining thread-safe cancellation in worker loops.
+  5. Implement `FrontierItem` with explicit `__hash__` and `__eq__` for set-based deduplication and queue operations.
+  6. Extend `PageRecord` with provenance fields (`normalized_url`, `depth`, `parent_url`, `fetch_strategy`, `crawler_engine`, `response_bytes`, `duration_ms`, `error_category`, `headers`), and persist all fields in SQLite with automatic schema migration.
+- **Consequences**: Legacy callers continue to function without breaking changes, while modern engines and inspectors gain complete forensic observability and multiprocessing compatibility.

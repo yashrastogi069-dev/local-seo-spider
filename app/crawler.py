@@ -19,7 +19,7 @@ from app.knowledge import infer_source_type
 from app.normalization import normalize_page_payload
 from app.extraction_profiles import extract_profile_fields, load_profile
 from app.parser import extract_api_entry_points, extract_links, extract_page_signals, normalized_text, text_hash
-from app.types import CrawlRequest, LinkRecord, PageRecord
+from app.types import CancellationToken, CrawlRequest, CrawlResult, CrawlStatus, EngineMode, FetchMode, LinkRecord, PageRecord
 from app.urltools import UrlValidationError, detect_api_pagination, is_same_host, normalize_url, redact_secrets_in_text, resolve_canonical_url
 from urllib.parse import urlsplit
 
@@ -135,8 +135,16 @@ class CrawlEngine:
         canonical_raw = selected["canonical"] or source_signals["canonical"]
         canonical = resolve_canonical_url(canonical_raw, final_url)
 
+        engine_mode = getattr(request, "executor_mode", "serial") or getattr(self.settings, "crawl_executor_mode", "serial")
+        status_code = response.status_code if response else None
+        err_cat = "none"
+        if fetch_error:
+            err_cat = "fetch_error"
+        elif status_code and status_code >= 400:
+            err_cat = f"http_{status_code}"
+
         page = PageRecord(
-            url=url, final_url=final_url, status_code=response.status_code, content_type=content_type,
+            url=url, final_url=final_url, status_code=status_code, content_type=content_type,
             title=title, description=selected["description"] or source_signals["description"],
             headings=selected["headings"] or source_signals["headings"], canonical=canonical,
             meta_robots=selected["meta_robots"] or source_signals["meta_robots"], x_robots=response.headers.get("x-robots-tag", "").lower(),
@@ -146,6 +154,15 @@ class CrawlEngine:
             extracted_fields=extracted_fields, extraction_notes=extraction_notes,
             discovered_at=self._now(), content_hash=text_hash(effective_rendered_text or source_html or extracted_text),
             etag=etag, last_modified=last_modified, source_type=source_type, depth=depth, parent_url=parent_url,
+            normalized_url=final_url or url,
+            fetch_strategy="browser" if render_html else "static",
+            requested_fetch_strategy="browser" if (self.settings.render_enabled and browser_page is not None) else "static",
+            actual_fetch_strategy="browser" if render_html else "static",
+            crawler_engine=engine_mode,
+            response_bytes=len(response.content) if response else 0,
+            duration_ms=0.0,
+            error_category=err_cat,
+            headers=dict(response.headers) if response else {},
         )
         return PageRecord(**normalize_page_payload(page.to_dict())), page_links
 
@@ -219,7 +236,7 @@ class CrawlEngine:
     def _materialize_static(self, request: CrawlRequest, result: tuple[str, tuple[int, dict[str, str], bytes, str] | None, list[dict[str, object]], str]) -> tuple[PageRecord, list[LinkRecord]]:
         url, payload, redirect_chain, fetch_error = result
         if payload is None:
-            return self._error_page(url, redirect_chain, fetch_error), []
+            return self._error_page(url, redirect_chain, fetch_error, getattr(request, "executor_mode", "serial")), []
         status_code, headers, content, final_url = payload
         response = httpx.Response(status_code, headers=headers, content=content, request=httpx.Request("GET", final_url))
         page, page_links = self._build_page(request, url, response, redirect_chain, fetch_error, None)
@@ -233,7 +250,10 @@ def _materialize_static_process(args: tuple[Settings, CrawlRequest, tuple[str, t
 
 
 class CrawlEngine(CrawlEngine):
-    def _run_static_mode(self, request: CrawlRequest, progress: callable) -> tuple[list[PageRecord], list[LinkRecord], str]:
+    def _run_static_mode(self, request: CrawlRequest, progress: callable, cancellation_token: CancellationToken | None = None) -> CrawlResult:
+        start_time = time.monotonic()
+        started_at = self._now()
+        mode = self._executor_mode(request)
         queue = deque(request.url_list if request.mode == "list" else [request.start_url])
         queued = set(queue)
         pages: list[PageRecord] = []
@@ -247,13 +267,23 @@ class CrawlEngine(CrawlEngine):
         thread_gate = Lock()
         last_request = {"value": time.monotonic()}
         while queue and len(pages) < request.max_urls:
+            if cancellation_token and cancellation_token.is_cancelled():
+                break
             batch: list[str] = []
             while queue and len(batch) < self._worker_count(request):
                 url = queue.popleft()
                 if robots.can_fetch(self.settings.user_agent, url):
                     batch.append(url)
                 else:
-                    pages.append(PageRecord(url=url, final_url=url, status_code=None, content_type="", title="", description="", headings={}, canonical="", meta_robots="", x_robots="", source_html="", rendered_html="", rendered_text="", images=[], structured_data=[], redirect_chain=[], robots_allowed=False, discovered_at=self._now(), content_hash=""))
+                    pages.append(
+                        PageRecord(
+                            url=url, final_url=url, status_code=None, content_type="", title="", description="", headings={}, canonical="",
+                            meta_robots="", x_robots="", source_html="", rendered_html="", rendered_text="", images=[], structured_data=[],
+                            redirect_chain=[], fetch_error="", render_error="", robots_allowed=False, discovered_at=self._now(), content_hash="",
+                            normalized_url=url, fetch_strategy="static", crawler_engine=mode, response_bytes=0, duration_ms=0.0,
+                            error_category="robots_disallowed", headers={},
+                        )
+                    )
             if pages and not batch:
                 progress(len(pages), len(queue), robots_status)
                 continue
@@ -303,7 +333,50 @@ class CrawlEngine(CrawlEngine):
                 links.extend(page_links)
                 self._enqueue_discovered(request, page, page_links, queue, queued, pagination_counts)
                 progress(len(pages), len(queue), robots_status)
-        return pages[: request.max_urls], links, robots_status
+
+        pages_to_return = pages[: request.max_urls]
+        finished_at = self._now()
+        duration_ms = (time.monotonic() - start_time) * 1000.0
+        pages_succeeded = sum(1 for p in pages_to_return if p.status_code and p.status_code < 400 and p.robots_allowed and not p.fetch_error)
+        pages_failed = len(pages_to_return) - pages_succeeded
+        fallback_occurred = bool(self.settings.render_enabled)
+        fallback_reason = "Browser rendering is unsupported in multi-worker static executor; fell back to static fetch." if fallback_occurred else ""
+        cancelled = bool(cancellation_token and cancellation_token.is_cancelled())
+        status = CrawlStatus.CANCELLED.value if cancelled else CrawlStatus.SUCCESS.value
+        if not cancelled and pages_failed > 0:
+            status = CrawlStatus.PARTIAL.value if pages_succeeded > 0 else CrawlStatus.FAILED.value
+
+        termination_reason = (
+            f"cancelled: {cancellation_token.reason or 'Cooperative cancellation requested'}"
+            if cancelled
+            else ("max_urls_reached" if len(pages) >= request.max_urls else "queue_empty")
+        )
+
+        return CrawlResult(
+            crawl_id=getattr(request, "crawl_id", ""),
+            requested_engine=mode,
+            actual_engine=mode,
+            requested_fetch_mode="browser" if self.settings.render_enabled else "static",
+            actual_fetch_mode="static",
+            fallback_occurred=fallback_occurred,
+            fallback_reason=fallback_reason,
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_ms=duration_ms,
+            status=status,
+            termination_reason=termination_reason,
+            pages_discovered=len(queued),
+            pages_attempted=len(pages_to_return),
+            pages_succeeded=pages_succeeded,
+            pages_failed=pages_failed,
+            pages_skipped=0,
+            duplicates_count=sum(1 for p in pages_to_return if p.is_duplicate),
+            retry_count=0,
+            errors=[p.fetch_error for p in pages_to_return if p.fetch_error],
+            pages=pages_to_return,
+            links=links,
+            robots_status=robots_status,
+        )
 
     def _executor_mode(self, request: CrawlRequest) -> str:
         return request.executor_mode or self.settings.crawl_executor_mode
@@ -318,7 +391,7 @@ class CrawlEngine(CrawlEngine):
             return self.settings.process_workers
         return 1
 
-    def run(self, request: CrawlRequest, progress: callable) -> tuple[list[PageRecord], list[LinkRecord], str]:
+    def run(self, request: CrawlRequest, progress: callable, cancellation_token: CancellationToken | None = None) -> CrawlResult:
         if not request.acknowledgment:
             raise ValueError("Ownership or permission acknowledgement is required before a crawl can start.")
         mode = self._executor_mode(request)
@@ -326,7 +399,9 @@ class CrawlEngine(CrawlEngine):
         if mode not in {"serial", "thread", "async", "process"}:
             raise ValueError("Crawl executor mode must be serial, thread, async, or process.")
         if mode != "serial":
-            return self._run_static_mode(request, progress)
+            return self._run_static_mode(request, progress, cancellation_token)
+        start_time = time.monotonic()
+        started_at = self._now()
         queue = deque(request.url_list if request.mode == "list" else [request.start_url])
         queued = set(queue)
         pages: list[PageRecord] = []
@@ -354,6 +429,8 @@ class CrawlEngine(CrawlEngine):
                     browser_page = None
             try:
                 while queue and len(pages) < request.max_urls:
+                    if cancellation_token and cancellation_token.is_cancelled():
+                        break
                     url = queue.popleft()
                     if not robots.can_fetch(self.settings.user_agent, url):
                         pages.append(
@@ -361,6 +438,8 @@ class CrawlEngine(CrawlEngine):
                                 url=url, final_url=url, status_code=None, content_type="", title="", description="", headings={}, canonical="",
                                 meta_robots="", x_robots="", source_html="", rendered_html="", rendered_text="", images=[], structured_data=[],
                                 redirect_chain=[], fetch_error="", render_error="", robots_allowed=False, discovered_at=self._now(), content_hash="",
+                                normalized_url=url, fetch_strategy="static", crawler_engine="serial", response_bytes=0, duration_ms=0.0,
+                                error_category="robots_disallowed", headers={},
                             )
                         )
                         progress(len(pages), len(queue), robots_status)
@@ -371,7 +450,7 @@ class CrawlEngine(CrawlEngine):
                     response, redirect_chain, fetch_error = self._fetch(client, url)
                     last_request_at = time.monotonic()
                     if not response:
-                        pages.append(self._error_page(url, redirect_chain, fetch_error))
+                        pages.append(self._error_page(url, redirect_chain, fetch_error, "serial"))
                         progress(len(pages), len(queue), robots_status)
                         continue
                     page, page_links = self._build_page(request, url, response, redirect_chain, fetch_error, browser_page)
@@ -402,7 +481,52 @@ class CrawlEngine(CrawlEngine):
                     browser.close()
                 if playwright:
                     playwright.stop()
-        return pages, links, robots_status
+
+        pages_to_return = pages[: request.max_urls]
+        finished_at = self._now()
+        duration_ms = (time.monotonic() - start_time) * 1000.0
+        pages_succeeded = sum(1 for p in pages_to_return if p.status_code and p.status_code < 400 and p.robots_allowed and not p.fetch_error)
+        pages_failed = len(pages_to_return) - pages_succeeded
+        requested_fetch_mode = "browser" if self.settings.render_enabled else "static"
+        actual_fetch_mode = "browser" if (self.settings.render_enabled and browser_page is not None) else "static"
+        fallback_occurred = (requested_fetch_mode == "browser" and actual_fetch_mode == "static")
+        fallback_reason = "Playwright/Chromium was unavailable for rendering; fell back to static fetch." if fallback_occurred else ""
+        cancelled = bool(cancellation_token and cancellation_token.is_cancelled())
+        status = CrawlStatus.CANCELLED.value if cancelled else CrawlStatus.SUCCESS.value
+        if not cancelled and pages_failed > 0:
+            status = CrawlStatus.PARTIAL.value if pages_succeeded > 0 else CrawlStatus.FAILED.value
+
+        termination_reason = (
+            f"cancelled: {cancellation_token.reason or 'Cooperative cancellation requested'}"
+            if cancelled
+            else ("max_urls_reached" if len(pages) >= request.max_urls else "queue_empty")
+        )
+
+        return CrawlResult(
+            crawl_id=getattr(request, "crawl_id", ""),
+            requested_engine="serial",
+            actual_engine="serial",
+            requested_fetch_mode=requested_fetch_mode,
+            actual_fetch_mode=actual_fetch_mode,
+            fallback_occurred=fallback_occurred,
+            fallback_reason=fallback_reason,
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_ms=duration_ms,
+            status=status,
+            termination_reason=termination_reason,
+            pages_discovered=len(queued),
+            pages_attempted=len(pages_to_return),
+            pages_succeeded=pages_succeeded,
+            pages_failed=pages_failed,
+            pages_skipped=0,
+            duplicates_count=sum(1 for p in pages_to_return if p.is_duplicate),
+            retry_count=0,
+            errors=[p.fetch_error for p in pages_to_return if p.fetch_error],
+            pages=pages_to_return,
+            links=links,
+            robots_status=robots_status,
+        )
 
     @staticmethod
     def _now() -> str:
@@ -462,9 +586,16 @@ class CrawlEngine(CrawlEngine):
         return result
 
     @staticmethod
-    def _error_page(url: str, redirect_chain: list[dict[str, object]], error: str) -> PageRecord:
+    def _error_page(url: str, redirect_chain: list[dict[str, object]], error: str, engine_mode: str = "serial") -> PageRecord:
         return PageRecord(
             url=url, final_url=url, status_code=None, content_type="", title="", description="", headings={}, canonical="", meta_robots="",
             x_robots="", source_html="", rendered_html="", rendered_text="", images=[], structured_data=[], redirect_chain=redirect_chain,
             fetch_error=error, render_error="", discovered_at=CrawlEngine._now(), content_hash="",
+            normalized_url=url,
+            fetch_strategy="static",
+            crawler_engine=engine_mode,
+            response_bytes=0,
+            duration_ms=0.0,
+            error_category="fetch_error",
+            headers={},
         )

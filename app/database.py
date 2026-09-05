@@ -81,9 +81,12 @@ class Database:
                   redirects_json TEXT NOT NULL, fetch_error TEXT NOT NULL, render_error TEXT NOT NULL,
                   robots_allowed INTEGER NOT NULL, body_truncated INTEGER NOT NULL, discovered_at TEXT NOT NULL,
                   internal_inlinks INTEGER NOT NULL DEFAULT 0, content_hash TEXT NOT NULL,
-                  etag TEXT NOT NULL DEFAULT '', last_modified TEXT NOT NULL DEFAULT '',
-                  is_duplicate INTEGER NOT NULL DEFAULT 0, duplicate_of TEXT NOT NULL DEFAULT '',
-                  source_type TEXT NOT NULL DEFAULT 'html_page', depth INTEGER NOT NULL DEFAULT 0, parent_url TEXT NOT NULL DEFAULT ''
+                   etag TEXT NOT NULL DEFAULT '', last_modified TEXT NOT NULL DEFAULT '',
+                   is_duplicate INTEGER NOT NULL DEFAULT 0, duplicate_of TEXT NOT NULL DEFAULT '',
+                   source_type TEXT NOT NULL DEFAULT 'html_page', depth INTEGER NOT NULL DEFAULT 0, parent_url TEXT NOT NULL DEFAULT '',
+                   normalized_url TEXT NOT NULL DEFAULT '', fetch_strategy TEXT NOT NULL DEFAULT 'static', crawler_engine TEXT NOT NULL DEFAULT 'serial',
+                   response_bytes INTEGER NOT NULL DEFAULT 0, duration_ms REAL NOT NULL DEFAULT 0.0, error_category TEXT NOT NULL DEFAULT 'none',
+                   headers_json TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_pages_crawl_url ON pages(crawl_id, url);
                 CREATE INDEX IF NOT EXISTS idx_pages_crawl_final ON pages(crawl_id, final_url);
@@ -152,6 +155,13 @@ class Database:
             "source_type": "TEXT NOT NULL DEFAULT 'html_page'",
             "depth": "INTEGER NOT NULL DEFAULT 0",
             "parent_url": "TEXT NOT NULL DEFAULT ''",
+            "normalized_url": "TEXT NOT NULL DEFAULT ''",
+            "fetch_strategy": "TEXT NOT NULL DEFAULT 'static'",
+            "crawler_engine": "TEXT NOT NULL DEFAULT 'serial'",
+            "response_bytes": "INTEGER NOT NULL DEFAULT 0",
+            "duration_ms": "REAL NOT NULL DEFAULT 0.0",
+            "error_category": "TEXT NOT NULL DEFAULT 'none'",
+            "headers_json": "TEXT NOT NULL DEFAULT '{}'",
         }
         for name, definition in required.items():
             if name not in existing:
@@ -369,8 +379,9 @@ class Database:
                 """INSERT INTO pages (crawl_id, url, final_url, status_code, content_type, title, description, headings_json,
                    canonical, meta_robots, x_robots, source_html, rendered_html, rendered_text, extracted_text, extraction_error, extracted_fields_json, extraction_notes_json, images_json, structured_data_json, api_entry_points_json,
                    redirects_json, fetch_error, render_error, robots_allowed, body_truncated, discovered_at, internal_inlinks, content_hash,
-                   etag, last_modified, is_duplicate, duplicate_of, source_type, depth, parent_url)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   etag, last_modified, is_duplicate, duplicate_of, source_type, depth, parent_url,
+                   normalized_url, fetch_strategy, crawler_engine, response_bytes, duration_ms, error_category, headers_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """,
                 [
                     (
@@ -382,6 +393,13 @@ class Database:
                         getattr(page, "etag", ""), getattr(page, "last_modified", ""),
                         int(getattr(page, "is_duplicate", False)), getattr(page, "duplicate_of", ""),
                         getattr(page, "source_type", "html_page"), getattr(page, "depth", 0), getattr(page, "parent_url", ""),
+                        getattr(page, "normalized_url", page.final_url or page.url),
+                        getattr(page, "fetch_strategy", "static"),
+                        getattr(page, "crawler_engine", "serial"),
+                        getattr(page, "response_bytes", 0),
+                        getattr(page, "duration_ms", 0.0),
+                        getattr(page, "error_category", "none"),
+                        json.dumps(getattr(page, "headers", {})),
                     ) for page in pages
                 ],
             )
@@ -819,8 +837,15 @@ class Database:
 
     def _page_row(self, row: sqlite3.Row) -> dict[str, Any]:
         page = dict(row)
-        for key in ("headings_json", "images_json", "structured_data_json", "api_entry_points_json", "redirects_json", "extracted_fields_json", "extraction_notes_json"):
-            page[key.removesuffix("_json")] = json.loads(page.pop(key))
+        for key in ("headings_json", "images_json", "structured_data_json", "api_entry_points_json", "redirects_json", "extracted_fields_json", "extraction_notes_json", "headers_json"):
+            if key in page and page[key]:
+                try:
+                    page[key.removesuffix("_json")] = json.loads(page.pop(key))
+                except Exception:
+                    page[key.removesuffix("_json")] = {} if "dict" in key or "headers" in key or "fields" in key else []
+            elif key in page:
+                page.pop(key)
+                page[key.removesuffix("_json")] = {} if "headers" in key or "fields" in key else []
         page["robots_allowed"] = bool(page["robots_allowed"])
         page["body_truncated"] = bool(page["body_truncated"])
         page["is_duplicate"] = bool(page.get("is_duplicate", 0))

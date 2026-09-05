@@ -39,12 +39,43 @@ This document defines the strict, non-negotiable release gates for every phase o
 - **GATE STATUS**: **PASSED**
 
 ### PHASE 2: Crawler Core
-- [x] HTTP connection pooling, exponential backoff on 429/5xx errors.
-- [x] Concurrency modes verified (serial, thread, async, multiprocess).
-- [x] Outbound SSRF protection across all IP representations (octal, hex, dword, IPv6-mapped) and cloud metadata endpoints.
-- [x] URL canonicalization and parameter sorting.
-- [ ] Comprehensive live internet soak test under high latency and network drops.
-- **GATE STATUS**: **PARTIAL**
+
+#### Subphase 2A: Crawler Contracts + State Model
+- [x] Stable crawler contract (`CrawlerEngineProtocol`, `CrawlRequest`, `CrawlResult`) established without forcing engines into monolithic execution.
+- [x] All 5 required termination states (`SUCCESS`, `PARTIAL`, `FAILED`, `CANCELLED`, `BUDGET_EXHAUSTED`) and operational states (`QUEUED`, `RUNNING`, `PAUSED`, `RETRYABLE`) defined in `CrawlStatus`.
+- [x] Backward-compatible sequence unpacking (`pages, links, robots = result`, `result[0]`, `len(result) == 3`) verified.
+- [x] No-silent-fallback invariants (`fallback_occurred`, `fallback_reason`) implemented and tested.
+- [x] `FrontierItem` defined with URL, depth, parent_url, hashability, and IPC picklability.
+- [x] `CancellationToken` implemented with thread-safe cooperative cancellation and picklability for multiprocess execution.
+- [x] `PageRecord` extended with full provenance (`normalized_url`, `depth`, `parent_url`, `fetch_strategy`, `requested_fetch_strategy`, `actual_fetch_strategy`, `crawler_engine`, `response_bytes`, `duration_ms`, `error_category`, `headers`).
+- [x] SQLite schema extended in `app/database.py` with automatic column migrations and retrieval verification.
+- [x] Contract test suite (`tests/test_crawler_contracts.py`) passes 16/16 tests. Full regression suite passes 145/145 tests.
+- [x] Fresh-Eyes Architecture Review completed by subagent; all P0/P1 contract issues addressed.
+- **SUBPHASE 2A GATE STATUS**: **PASSED**
+
+#### Subphase 2B: Engine Independence & Browser Integration
+- [ ] Serial engine standalone rewrite with persistent HTTP client and clean Playwright lifecycle.
+- [ ] Browser crash and timeout error recovery without silent static fallback.
+- **SUBPHASE 2B GATE STATUS**: **PENDING**
+
+#### Subphase 2C: Concurrency Engines (Threaded, Async, Multiprocess)
+- [ ] Threaded engine with per-domain politeness and shared connection pool.
+- [ ] Async coroutine engine with persistent single event loop and AsyncClient.
+- [ ] Multiprocess engine with genuine parallel process socket fetching.
+- **SUBPHASE 2C GATE STATUS**: **PENDING**
+
+#### Subphase 2D: Resilient Frontier & Persistence
+- [ ] Incremental page-by-page persistence to SQLite during crawl.
+- [ ] URL frontier tracking (url, depth, parent_url) with redirect targets queued.
+- [ ] Pause, resume, and cancellation via API / CLI endpoints.
+- **SUBPHASE 2D GATE STATUS**: **PENDING**
+
+#### Subphase 2E: Security, Politeness & Resource Verification
+- [ ] Pre-socket DNS resolution blocking private/metadata IPs across all IP formats.
+- [ ] Resource leak tests verifying zero HTTP client or browser zombie processes.
+- **SUBPHASE 2E GATE STATUS**: **PENDING**
+
+- **GATE STATUS**: **PARTIAL (Subphase 2A PASSED)**
 
 ### PHASE 3: Universal Extraction
 - [x] Preservation of JSON deep semantics, scalar types, and nested object relationships.
