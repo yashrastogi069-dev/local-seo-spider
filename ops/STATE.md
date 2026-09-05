@@ -1,6 +1,6 @@
 # OPERATIONAL STATE: PRIMARY SHORT-TERM MEMORY
 
-*Last Updated*: 2026-09-05T19:20:00+05:30  
+*Last Updated*: 2026-09-06T04:45:00+05:30  
 *Operating Mode*: Engineering Operating System & Integrity Layer  
 *Primary Source of Truth*: Executable Code (`app/`) & Automated Tests (`tests/`)
 
@@ -8,19 +8,23 @@
 
 ## 1. Active Phase & Subphase
 - **Active Phase**: PHASE 2 (Crawler Core)
-- **Active Subphase**: Phase 2B (URL Normalization + Frontier + Crawl Lifecycle) — **COMPLETED & VERIFIED**
-- **Next Transition Subphase**: Phase 2C (Serial + Threaded Engine Hardening & Politeness)
+- **Active Subphase**: Phase 2D (Concurrency, Races, Failure & Resource Safety) — **KICKING OFF**
+- **Completed Subphases**:
+  - Phase 2A (Crawler Contracts + State Model) — **PASSED**
+  - Phase 2B (URL Normalization + Frontier + Crawl Lifecycle) — **PASSED**
+  - Phase 2C (Four Independent Crawler Engines) — **PASSED & CERTIFIED**
 - **Baseline Git Checkpoints**:
   - `db7fc50` (Tags: `phase-1-certified`, `pre-phase-2-crawler-core`)
-  - Target commit for Phase 2B (Tag: `phase-2b-frontier`)
+  - Target commit for Phase 2C (Tag: `phase-2c-engine-independence`)
 - **Phase 1 Evaluation Baseline**: **FROZEN & TRUSTED** (Do NOT modify Phase 1 fixtures)
 
 ---
 
 ## 2. Current Objective
-Transition from Phase 2B completion to Phase 2C (Serial + Threaded Engine Hardening & Politeness):
-1. Phase 2B URL normalization, 8-state frontier FSM, terminal idempotency, redirect alias mapping, canonical deduplication, and controlled test server verification fully complete.
-2. Advance to Phase 2C: Harden Serial and Threaded engines with persistent HTTP client connection pooling, per-domain politeness throttling, and independent browser lifecycle.
+Begin and execute **Phase 2D (Concurrency, Races, Failure & Resource Safety)**:
+1. Break the crawler under concurrent stress conditions (simultaneous duplicate discovery, worker exceptions, slow endpoints, 500/429 storms, SQLite contention, mid-crawl cancellation, shutdown during retry backoff).
+2. Detect and eliminate race conditions, duplicate DB inserts, lost URLs, deadlock, livelock, queue corruption, and premature termination.
+3. Verify resource safety (zero thread, socket, or process leaks across repeated crawls).
 
 ---
 
@@ -30,20 +34,20 @@ Transition from Phase 2B completion to Phase 2C (Serial + Threaded Engine Harden
 - **Phase 2 Status**: `ACTIVE`
   - **Subphase 2A Status**: `PASSED`
   - **Subphase 2B Status**: `PASSED`
-  - **Subphase 2C Status**: `PENDING`
-- **Current Test State**: 182 Passed, 2 Skipped (due to optional `sentence-transformers`), 0 Failed across 29 test modules.
+  - **Subphase 2C Status**: `PASSED`
+  - **Subphase 2D Status**: `ACTIVE`
+- **Current Test State**: 238 Passed, 2 Skipped (due to optional `sentence-transformers`), 0 Failed across 33 test modules.
 
 ---
 
 ## 4. Last Verified Test State
-- **Command**: `pytest -q`
-- **Results**: 182 passed, 2 skipped in 85.60s across 29 test modules.
-- **Phase 2B Targeted Suites**:
-  - `tests/test_url_normalization.py`: 13/13 passed.
-  - `tests/test_frontier_lifecycle.py`: 11/11 passed.
-  - `tests/test_controlled_crawler.py`: 12/12 passed.
-  - `tests/test_crawler_contracts.py`: 16/16 passed.
-  - Total targeted suite: 52/52 passed in 19.64s.
+- **Command**: `pytest`
+- **Results**: 238 passed, 2 skipped, 0 failed in 232.12s across 33 test modules.
+- **Phase 2C Conformance & Concurrency Proof Suites**:
+  - `tests/test_concurrency_proof.py`: 4/4 passed (Serial, Thread, Async, Multiprocess verified with overlapping intervals, server peak concurrency $\ge 2$, distinct child worker PIDs).
+  - `tests/test_engine_conformance.py`: 48/48 passed (all 18 requirements verified across all 4 engines).
+  - `tests/test_engine_consistency.py`: 1/1 passed (identical discovered URLs, status codes, depths, and content hashes across all 4 engines).
+  - `tests/test_engine_failure_fallback.py`: 5/5 passed (fail-closed, anti-silent-fallback guarantees).
 - **Regression Suite**: 11/11 historic regressions passed (`tests/test_observed_regressions.py`).
 - **Security Suite**: 23/23 SSRF and secret redaction tests passed (`tests/test_ssrf_and_redaction.py`).
 - **Contamination Suite**: 3/3 contamination tests passed (`tests/test_contamination.py`).

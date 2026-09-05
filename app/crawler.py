@@ -1,27 +1,34 @@
-"""Bounded, robots-aware collection for explicitly authorized same-host crawls."""
+"""Bounded, robots-aware collection for explicitly authorized same-host crawls across 4 genuinely independent engines."""
 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+from concurrent.futures.process import BrokenProcessPool
+import multiprocessing
+import os
+import threading
 import time
-from email.utils import parsedate_to_datetime
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from threading import Lock
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from typing import Any
 from urllib import robotparser
+from urllib.parse import urlsplit
 
 import httpx
 
 from app.config import Settings
 from app.documents import extract_document_text
-from app.knowledge import infer_source_type
-from app.normalization import normalize_page_payload
 from app.extraction_profiles import extract_profile_fields, load_profile
+from app.frontier import CrawlFrontier, FrontierEntry
+from app.knowledge import infer_source_type
+from app.multiprocess_worker import execute_worker_crawl_task
+from app.normalization import normalize_page_payload
 from app.parser import extract_api_entry_points, extract_links, extract_page_signals, normalized_text, text_hash
-from app.frontier import CrawlFrontier
 from app.types import (
     CancellationToken,
+    CrawlerEngineProtocol,
     CrawlRequest,
     CrawlResult,
     CrawlStatus,
@@ -39,15 +46,89 @@ from app.urltools import (
     redact_secrets_in_text,
     resolve_canonical_url,
 )
-from urllib.parse import urlsplit
 
 _PRESERVE_SLASH_POLICY = UrlNormalizationPolicy(trailing_slash="preserve")
 
 
-class CrawlEngine:
+class DomainPolitenessThrottler:
+    """Thread-safe per-domain politeness coordinator."""
+
+    def __init__(self, delay_seconds: float) -> None:
+        self.delay_seconds = delay_seconds
+        self._meta_lock = threading.Lock()
+        self._domain_locks: dict[str, threading.Lock] = {}
+        self._last_request_time: dict[str, float] = {}
+
+    def _get_domain_lock(self, domain: str) -> threading.Lock:
+        with self._meta_lock:
+            if domain not in self._domain_locks:
+                self._domain_locks[domain] = threading.Lock()
+            return self._domain_locks[domain]
+
+    def throttle(self, url: str) -> None:
+        if self.delay_seconds <= 0:
+            return
+        domain = (urlsplit(url).netloc or "").lower()
+        domain_lock = self._get_domain_lock(domain)
+        with domain_lock:
+            with self._meta_lock:
+                last_time = self._last_request_time.get(domain, 0.0)
+            now = time.monotonic()
+            pause = self.delay_seconds - (now - last_time)
+            if pause > 0:
+                time.sleep(pause)
+            with self._meta_lock:
+                self._last_request_time[domain] = time.monotonic()
+
+
+class AsyncDomainPolitenessThrottler:
+    """Async per-domain politeness coordinator."""
+
+    def __init__(self, delay_seconds: float) -> None:
+        self.delay_seconds = delay_seconds
+        self._domain_locks: dict[str, asyncio.Lock] = {}
+        self._last_request_time: dict[str, float] = {}
+
+    async def throttle(self, url: str) -> None:
+        if self.delay_seconds <= 0:
+            return
+        domain = (urlsplit(url).netloc or "").lower()
+        if domain not in self._domain_locks:
+            self._domain_locks[domain] = asyncio.Lock()
+
+        async with self._domain_locks[domain]:
+            now = time.monotonic()
+            last_time = self._last_request_time.get(domain, 0.0)
+            pause = self.delay_seconds - (now - last_time)
+            if pause > 0:
+                await asyncio.sleep(pause)
+            self._last_request_time[domain] = time.monotonic()
+
+
+class BaseCrawlerEngine:
+    """Base crawler engine providing shared signal extraction, robots, and result assembly."""
+
     def __init__(self, settings: Settings):
         self.settings = settings
         self.extraction_profile = load_profile(settings.extraction_profile_path)
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.now(UTC).replace(microsecond=0).isoformat()
+
+    @staticmethod
+    def _empty_signals() -> dict[str, object]:
+        return {
+            "title": "",
+            "description": "",
+            "headings": {},
+            "canonical": "",
+            "meta_robots": "",
+            "images": [],
+            "structured_data": [],
+            "api_entry_points": [],
+            "links": [],
+        }
 
     def _robots(self, client: httpx.Client, start_url: str) -> tuple[robotparser.RobotFileParser, str]:
         parsed = httpx.URL(start_url)
@@ -56,6 +137,22 @@ class CrawlEngine:
         policy.set_url(robots_url)
         try:
             response = client.get(robots_url, follow_redirects=True)
+            if response.status_code == 200:
+                policy.parse(response.text.splitlines())
+                return policy, "loaded"
+            policy.allow_all = True
+            return policy, f"unavailable (HTTP {response.status_code})"
+        except httpx.HTTPError as exc:
+            policy.allow_all = True
+            return policy, f"unavailable ({type(exc).__name__})"
+
+    async def _async_robots(self, client: httpx.AsyncClient, start_url: str) -> tuple[robotparser.RobotFileParser, str]:
+        parsed = httpx.URL(start_url)
+        robots_url = str(parsed.copy_with(path="/robots.txt", query=None, fragment=None))
+        policy = robotparser.RobotFileParser()
+        policy.set_url(robots_url)
+        try:
+            response = await client.get(robots_url, follow_redirects=True)
             if response.status_code == 200:
                 policy.parse(response.text.splitlines())
                 return policy, "loaded"
@@ -84,8 +181,9 @@ class CrawlEngine:
         current = url
         hops: list[dict[str, object]] = []
         transient_statuses = {408, 425, 429, 500, 502, 503, 504}
+        response: httpx.Response | None = None
         for _ in range(self.settings.max_redirects + 1):
-            response: httpx.Response | None = None
+            response = None
             for attempt in range(self.settings.max_request_retries + 1):
                 try:
                     response = client.get(current, follow_redirects=False)
@@ -94,7 +192,12 @@ class CrawlEngine:
                         return None, hops, f"{type(exc).__name__} after {attempt + 1} attempt(s): {exc}"
                     time.sleep(self.settings.retry_backoff_seconds * (2 ** attempt))
                     continue
-                hops.append({"url": current, "status_code": response.status_code, "location": response.headers.get("location", ""), "attempt": attempt + 1})
+                hops.append({
+                    "url": current,
+                    "status_code": response.status_code,
+                    "location": response.headers.get("location", ""),
+                    "attempt": attempt + 1,
+                })
                 if response.status_code in transient_statuses and attempt < self.settings.max_request_retries:
                     time.sleep(self._retry_delay(response, attempt, self.settings.retry_backoff_seconds))
                     continue
@@ -117,6 +220,79 @@ class CrawlEngine:
             return response, hops, ""
         return response, hops, f"Redirect limit ({self.settings.max_redirects}) exceeded."
 
+    async def _async_fetch(self, client: httpx.AsyncClient, url: str) -> tuple[httpx.Response | None, list[dict[str, object]], str]:
+        current = url
+        hops: list[dict[str, object]] = []
+        transient_statuses = {408, 425, 429, 500, 502, 503, 504}
+        response: httpx.Response | None = None
+        for _ in range(self.settings.max_redirects + 1):
+            response = None
+            for attempt in range(self.settings.max_request_retries + 1):
+                try:
+                    response = await client.get(current, follow_redirects=False)
+                except httpx.HTTPError as exc:
+                    if attempt >= self.settings.max_request_retries:
+                        return None, hops, f"{type(exc).__name__} after {attempt + 1} attempt(s): {exc}"
+                    await asyncio.sleep(self.settings.retry_backoff_seconds * (2 ** attempt))
+                    continue
+                hops.append({
+                    "url": current,
+                    "status_code": response.status_code,
+                    "location": response.headers.get("location", ""),
+                    "attempt": attempt + 1,
+                })
+                if response.status_code in transient_statuses and attempt < self.settings.max_request_retries:
+                    await asyncio.sleep(self._retry_delay(response, attempt, self.settings.retry_backoff_seconds))
+                    continue
+                break
+            if response is None:
+                return None, hops, "Request ended without a response."
+            if response.is_redirect and response.headers.get("location"):
+                try:
+                    current = normalize_url(
+                        response.headers["location"],
+                        current,
+                        allow_private=getattr(self.settings, "allow_private_crawls", False),
+                        policy=_PRESERVE_SLASH_POLICY,
+                    )
+                except UrlValidationError:
+                    return response, hops, "Redirect location could not be normalized."
+                continue
+            if response.status_code in transient_statuses:
+                return response, hops, f"Transient HTTP status {response.status_code} remained after {self.settings.max_request_retries + 1} attempt(s)."
+            return response, hops, ""
+        return response, hops, f"Redirect limit ({self.settings.max_redirects}) exceeded."
+
+    @staticmethod
+    def _response_payload(response: httpx.Response | None) -> tuple[int, dict[str, str], bytes, str] | None:
+        if response is None:
+            return None
+        return response.status_code, dict(response.headers), response.content, str(response.url)
+
+    def _fetch_one_sync(self, url: str) -> tuple[str, tuple[int, dict[str, str], bytes, str] | None, list[dict[str, object]], str]:
+        headers = {
+            "User-Agent": self.settings.user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json,application/xml,text/csv",
+        }
+        with httpx.Client(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
+            response, redirect_chain, fetch_error = self._fetch(client, url)
+            return url, self._response_payload(response), redirect_chain, fetch_error
+
+    def _is_fetch_one_sync_overridden(self) -> bool:
+        fn = getattr(self, "_fetch_one_sync", None)
+        if fn is None:
+            return False
+        return getattr(fn, "__func__", fn) is not BaseCrawlerEngine._fetch_one_sync
+
+    async def _async_batch(self, urls: list[str], delay_seconds: float) -> list[tuple[str, tuple[int, dict[str, str], bytes, str] | None, list[dict[str, object]], str]]:
+        return [self._fetch_one_sync(u) for u in urls]
+
+    def _is_async_batch_overridden(self) -> bool:
+        fn = getattr(self, "_async_batch", None)
+        if fn is None:
+            return False
+        return getattr(fn, "__func__", fn) is not BaseCrawlerEngine._async_batch
+
     def _render(self, browser_page: object | None, url: str) -> tuple[str, str, str]:
         if browser_page is None:
             return "", "", "Rendering is disabled or Chromium is unavailable."
@@ -126,12 +302,23 @@ class CrawlEngine:
             html = browser_page.content()
             text = browser_page.locator("body").inner_text(timeout=5_000)
             return html[: self.settings.max_document_bytes], normalized_text(text), ""
-        except Exception as exc:  # Browser-originated errors are recoverable per page.
+        except Exception as exc:
             return "", "", f"Rendered inspection failed: {type(exc).__name__}: {exc}"
 
-    def _build_page(self, request: CrawlRequest, url: str, response: httpx.Response | None, redirect_chain: list[dict[str, object]], fetch_error: str, browser_page: object | None = None, parent_url: str = "", depth: int = 0) -> tuple[PageRecord, list[LinkRecord]]:
+    def _build_page(
+        self,
+        request: CrawlRequest,
+        url: str,
+        response: httpx.Response | None,
+        redirect_chain: list[dict[str, object]],
+        fetch_error: str,
+        browser_page: object | None = None,
+        parent_url: str = "",
+        depth: int = 0,
+        engine_mode: str = "serial",
+    ) -> tuple[PageRecord, list[LinkRecord]]:
         if not response:
-            return self._error_page(url, redirect_chain, fetch_error), []
+            return self._error_page(url, redirect_chain, fetch_error, engine_mode=engine_mode, depth=depth, parent_url=parent_url), []
         content_type = response.headers.get("content-type", "").split(";", 1)[0].lower().strip()
         source_html = response.text[: self.settings.max_document_bytes] if "html" in content_type else ""
         extracted_text, extraction_error = ("", "") if source_html else extract_document_text(content_type, response.content[: self.settings.max_document_bytes])
@@ -161,7 +348,6 @@ class CrawlEngine:
         canonical_raw = selected["canonical"] or source_signals["canonical"]
         canonical = resolve_canonical_url(canonical_raw, final_url, allow_private=allow_private)
 
-        engine_mode = getattr(request, "executor_mode", "serial") or getattr(self.settings, "crawl_executor_mode", "serial")
         status_code = response.status_code if response else None
         err_cat = "none"
         if fetch_error:
@@ -192,462 +378,6 @@ class CrawlEngine:
         )
         return PageRecord(**normalize_page_payload(page.to_dict())), page_links
 
-
-    @staticmethod
-    def _response_payload(response: httpx.Response | None) -> tuple[int, dict[str, str], bytes, str] | None:
-        if response is None:
-            return None
-        return response.status_code, dict(response.headers), response.content, str(response.url)
-
-    def _fetch_one_sync(self, url: str) -> tuple[str, tuple[int, dict[str, str], bytes, str] | None, list[dict[str, object]], str]:
-        with httpx.Client(headers={"User-Agent": self.settings.user_agent, "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json,application/xml,text/csv"}, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
-            response, redirect_chain, fetch_error = self._fetch(client, url)
-            return url, self._response_payload(response), redirect_chain, fetch_error
-
-    async def _fetch_one_async(self, client: httpx.AsyncClient, url: str, gate: asyncio.Lock, last_request: dict[str, float], delay_seconds: float) -> tuple[str, tuple[int, dict[str, str], bytes, str] | None, list[dict[str, object]], str]:
-        async with gate:
-            pause = delay_seconds - (time.monotonic() - last_request["value"])
-            if pause > 0:
-                await asyncio.sleep(pause)
-            last_request["value"] = time.monotonic()
-        current = url
-        hops: list[dict[str, object]] = []
-        transient_statuses = {408, 425, 429, 500, 502, 503, 504}
-        for _ in range(self.settings.max_redirects + 1):
-            response: httpx.Response | None = None
-            for attempt in range(self.settings.max_request_retries + 1):
-                try:
-                    response = await client.get(current, follow_redirects=False)
-                except httpx.HTTPError as exc:
-                    if attempt >= self.settings.max_request_retries:
-                        return url, None, hops, f"{type(exc).__name__} after {attempt + 1} attempt(s): {exc}"
-                    await asyncio.sleep(self.settings.retry_backoff_seconds * (2 ** attempt))
-                    continue
-                hops.append({"url": current, "status_code": response.status_code, "location": response.headers.get("location", ""), "attempt": attempt + 1})
-                if response.status_code in transient_statuses and attempt < self.settings.max_request_retries:
-                    await asyncio.sleep(self._retry_delay(response, attempt, self.settings.retry_backoff_seconds))
-                    continue
-                break
-            if response is None:
-                return url, None, hops, "Request ended without a response."
-            if response.is_redirect and response.headers.get("location"):
-                try:
-                    current = normalize_url(
-                        response.headers["location"],
-                        current,
-                        allow_private=getattr(self.settings, "allow_private_crawls", False),
-                        policy=_PRESERVE_SLASH_POLICY,
-                    )
-                except UrlValidationError:
-                    return url, self._response_payload(response), hops, "Redirect location could not be normalized."
-                continue
-            if response.status_code in transient_statuses:
-                return url, self._response_payload(response), hops, f"Transient HTTP status {response.status_code} remained after {self.settings.max_request_retries + 1} attempt(s)."
-            return url, self._response_payload(response), hops, ""
-        return url, self._response_payload(response), hops, f"Redirect limit ({self.settings.max_redirects}) exceeded."
-
-    def _wait_thread_slot(self, gate: Lock, last_request: dict[str, float], delay_seconds: float) -> None:
-        with gate:
-            pause = delay_seconds - (time.monotonic() - last_request["value"])
-            if pause > 0:
-                time.sleep(pause)
-            last_request["value"] = time.monotonic()
-
-    def _thread_fetch_with_gate(self, url: str, gate: Lock, last_request: dict[str, float], delay_seconds: float) -> tuple[str, tuple[int, dict[str, str], bytes, str] | None, list[dict[str, object]], str]:
-        self._wait_thread_slot(gate, last_request, delay_seconds)
-        return self._fetch_one_sync(url)
-
-    async def _async_batch(self, urls: list[str], delay_seconds: float) -> list[tuple[str, tuple[int, dict[str, str], bytes, str] | None, list[dict[str, object]], str]]:
-        headers = {"User-Agent": self.settings.user_agent, "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json,application/xml,text/csv"}
-        gate = asyncio.Lock()
-        last_request = {"value": time.monotonic()}
-        async with httpx.AsyncClient(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
-            return await asyncio.gather(*(self._fetch_one_async(client, url, gate, last_request, delay_seconds) for url in urls))
-
-    def _materialize_static(self, request: CrawlRequest, result: tuple[str, tuple[int, dict[str, str], bytes, str] | None, list[dict[str, object]], str]) -> tuple[PageRecord, list[LinkRecord]]:
-        url, payload, redirect_chain, fetch_error = result
-        if payload is None:
-            return self._error_page(url, redirect_chain, fetch_error, getattr(request, "executor_mode", "serial")), []
-        status_code, headers, content, final_url = payload
-        response = httpx.Response(status_code, headers=headers, content=content, request=httpx.Request("GET", final_url))
-        page, page_links = self._build_page(request, url, response, redirect_chain, fetch_error, None)
-        return page, page_links
-
-
-def _materialize_static_process(args: tuple[Settings, CrawlRequest, tuple[str, tuple[int, dict[str, str], bytes, str] | None, list[dict[str, object]], str]]) -> tuple[dict[str, object], list[dict[str, object]]]:
-    settings, request, result = args
-    page, links = CrawlEngine(settings)._materialize_static(request, result)
-    return page.to_dict(), [link.to_dict() for link in links]
-
-
-class CrawlEngine(CrawlEngine):
-    def _run_static_mode(self, request: CrawlRequest, progress: callable, cancellation_token: CancellationToken | None = None) -> CrawlResult:
-        start_time = time.monotonic()
-        started_at = self._now()
-        mode = self._executor_mode(request)
-        frontier = CrawlFrontier(
-            start_url=request.start_url,
-            max_urls=request.max_urls,
-            max_depth=getattr(request, "max_depth", 10),
-            mode=request.mode,
-            url_list=request.url_list,
-            allow_private=getattr(self.settings, "allow_private_crawls", False),
-            max_retries=self.settings.max_request_retries,
-            retry_backoff_seconds=self.settings.retry_backoff_seconds,
-        )
-        pages: list[PageRecord] = []
-        links: list[LinkRecord] = []
-        seen_content_hashes: dict[str, str] = {}
-        seen_canonicals: dict[str, str] = {}
-        pagination_counts: dict[str, int] = {}
-        headers = {"User-Agent": self.settings.user_agent, "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json,application/xml,text/csv"}
-        with httpx.Client(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
-            robots, robots_status = self._robots(client, request.start_url)
-        thread_gate = Lock()
-        last_request = {"value": time.monotonic()}
-        while not frontier.is_complete() and len(pages) < request.max_urls:
-            if cancellation_token and cancellation_token.is_cancelled():
-                break
-            batch_entries: list[FrontierEntry] = []
-            while len(batch_entries) < self._worker_count(request) and not frontier.is_complete():
-                entry = frontier.get_next()
-                if entry is None:
-                    break
-                if robots.can_fetch(self.settings.user_agent, entry.url):
-                    batch_entries.append(entry)
-                else:
-                    frontier.mark_skipped(entry.url, reason="robots_disallowed")
-                    pages.append(
-                        PageRecord(
-                            url=entry.url, final_url=entry.url, depth=entry.depth, parent_url=entry.parent_url, status_code=None, content_type="", title="", description="", headings={}, canonical="",
-                            meta_robots="", x_robots="", source_html="", rendered_html="", rendered_text="", images=[], structured_data=[],
-                            redirect_chain=[], fetch_error="", render_error="", robots_allowed=False, discovered_at=self._now(), content_hash="",
-                            normalized_url=entry.url, fetch_strategy="static", crawler_engine=mode, response_bytes=0, duration_ms=0.0,
-                            error_category="robots_disallowed", headers={},
-                        )
-                    )
-            if pages and not batch_entries:
-                progress(len(pages), frontier.queue_size, robots_status)
-                if frontier.is_complete():
-                    break
-                time.sleep(0.02)
-                continue
-
-            batch = [e.url for e in batch_entries]
-            batch_map = {e.url: e for e in batch_entries}
-            if self._executor_mode(request) == "async":
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    loop = None
-                if loop and loop.is_running():
-                    import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                        results = pool.submit(asyncio.run, self._async_batch(batch, request.delay_seconds)).result()
-                else:
-                    results = asyncio.run(self._async_batch(batch, request.delay_seconds))
-                materialized = [self._materialize_static(request, result) for result in results]
-            elif self._executor_mode(request) == "process":
-                try:
-                    fetched = [self._thread_fetch_with_gate(url, thread_gate, last_request, request.delay_seconds) for url in batch]
-                    with ProcessPoolExecutor(max_workers=self.settings.process_workers) as executor:
-                        processed = list(executor.map(_materialize_static_process, [(self.settings, request, result) for result in fetched]))
-                        materialized = [(PageRecord(**page), [LinkRecord(**link) for link in page_links]) for page, page_links in processed]
-                except Exception as exc:
-                    raise RuntimeError(f"Process executor mode failed: {type(exc).__name__}: {exc}") from exc
-            else:
-                with ThreadPoolExecutor(max_workers=self.settings.thread_workers) as executor:
-                    fetched = list(executor.map(lambda url: self._thread_fetch_with_gate(url, thread_gate, last_request, request.delay_seconds), batch))
-                materialized = [self._materialize_static(request, result) for result in fetched]
-
-            for page, page_links in materialized:
-                orig_entry = batch_map.get(page.url)
-                if orig_entry:
-                    page.depth = orig_entry.depth
-                    page.parent_url = orig_entry.parent_url
-
-                if page.final_url and page.final_url != page.url:
-                    frontier.handle_redirect(page.url, page.final_url, page.depth, page.parent_url, enqueue_target=False)
-
-                # Deduplication detection
-                is_dup = False
-                dup_of = ""
-                if page.canonical and page.canonical != page.final_url:
-                    is_canon_dup = frontier.handle_canonical(page.final_url, page.canonical)
-                    if is_canon_dup:
-                        is_dup = True
-                        dup_of = page.canonical
-                    elif page.canonical in seen_canonicals:
-                        is_dup = True
-                        dup_of = seen_canonicals[page.canonical]
-                    else:
-                        seen_canonicals[page.canonical] = page.final_url
-                elif page.content_hash and page.content_hash in seen_content_hashes and (page.rendered_text or page.extracted_text or page.source_html):
-                    is_dup = True
-                    dup_of = seen_content_hashes[page.content_hash]
-                else:
-                    if page.canonical:
-                        seen_canonicals[page.canonical] = page.final_url
-                    if page.content_hash:
-                        seen_content_hashes[page.content_hash] = page.final_url
-                page.is_duplicate = is_dup
-                page.duplicate_of = dup_of
-
-                if is_dup:
-                    frontier.mark_duplicate(page.url, dup_of)
-                elif page.status_code and page.status_code >= 400:
-                    frontier.mark_failed(page.url, f"HTTP {page.status_code}", is_retryable=False)
-                else:
-                    frontier.mark_completed(page.url, status_code=page.status_code or 200)
-
-                pages.append(page)
-                links.extend(page_links)
-                self._enqueue_discovered(request, page, page_links, frontier, pagination_counts)
-                progress(len(pages), frontier.queue_size, robots_status)
-
-        pages_to_return = pages[: request.max_urls]
-        finished_at = self._now()
-        duration_ms = (time.monotonic() - start_time) * 1000.0
-        pages_succeeded = sum(1 for p in pages_to_return if p.status_code and p.status_code < 400 and p.robots_allowed and not p.fetch_error)
-        pages_failed = len(pages_to_return) - pages_succeeded
-        fallback_occurred = bool(self.settings.render_enabled)
-        fallback_reason = "Browser rendering is unsupported in multi-worker static executor; fell back to static fetch." if fallback_occurred else ""
-        cancelled = bool(cancellation_token and cancellation_token.is_cancelled())
-        status = CrawlStatus.CANCELLED.value if cancelled else CrawlStatus.SUCCESS.value
-        if not cancelled and pages_failed > 0:
-            status = CrawlStatus.PARTIAL.value if pages_succeeded > 0 else CrawlStatus.FAILED.value
-
-        termination_reason = (
-            f"cancelled: {cancellation_token.reason or 'Cooperative cancellation requested'}"
-            if cancelled
-            else ("max_urls_reached" if len(pages) >= request.max_urls else "queue_empty")
-        )
-
-        accounting = frontier.reconcile_accounting()
-
-        return CrawlResult(
-            crawl_id=getattr(request, "crawl_id", ""),
-            requested_engine=mode,
-            actual_engine=mode,
-            requested_fetch_mode="browser" if self.settings.render_enabled else "static",
-            actual_fetch_mode="static",
-            fallback_occurred=fallback_occurred,
-            fallback_reason=fallback_reason,
-            started_at=started_at,
-            finished_at=finished_at,
-            duration_ms=duration_ms,
-            status=status,
-            termination_reason=termination_reason,
-            pages_discovered=frontier.total_discovered,
-            pages_attempted=len(pages_to_return),
-            pages_succeeded=pages_succeeded,
-            pages_failed=pages_failed,
-            pages_skipped=accounting.get("skipped", 0),
-            duplicates_count=sum(1 for p in pages_to_return if p.is_duplicate),
-            retry_count=0,
-            errors=[p.fetch_error for p in pages_to_return if p.fetch_error],
-            pages=pages_to_return,
-            links=links,
-            robots_status=robots_status,
-        )
-
-    def _executor_mode(self, request: CrawlRequest) -> str:
-        return request.executor_mode or self.settings.crawl_executor_mode
-
-    def _worker_count(self, request: CrawlRequest) -> int:
-        mode = self._executor_mode(request)
-        if mode == "async":
-            return self.settings.async_concurrency
-        if mode == "thread":
-            return self.settings.thread_workers
-        if mode == "process":
-            return self.settings.process_workers
-        return 1
-
-    def run(self, request: CrawlRequest, progress: callable, cancellation_token: CancellationToken | None = None) -> CrawlResult:
-        if not request.acknowledgment:
-            raise ValueError("Ownership or permission acknowledgement is required before a crawl can start.")
-        mode = self._executor_mode(request)
-        self.extraction_profile = load_profile(request.extraction_profile_path or self.settings.extraction_profile_path)
-        if mode not in {"serial", "thread", "async", "process"}:
-            raise ValueError("Crawl executor mode must be serial, thread, async, or process.")
-        if mode != "serial":
-            return self._run_static_mode(request, progress, cancellation_token)
-        start_time = time.monotonic()
-        started_at = self._now()
-        frontier = CrawlFrontier(
-            start_url=request.start_url,
-            max_urls=request.max_urls,
-            max_depth=getattr(request, "max_depth", 10),
-            mode=request.mode,
-            url_list=request.url_list,
-            allow_private=getattr(self.settings, "allow_private_crawls", False),
-            max_retries=self.settings.max_request_retries,
-            retry_backoff_seconds=self.settings.retry_backoff_seconds,
-        )
-        pages: list[PageRecord] = []
-        links: list[LinkRecord] = []
-        seen_content_hashes: dict[str, str] = {}
-        seen_canonicals: dict[str, str] = {}
-        pagination_counts: dict[str, int] = {}
-        last_request_at = 0.0
-        headers = {"User-Agent": self.settings.user_agent, "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json,application/xml,text/csv"}
-
-        with httpx.Client(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
-            robots, robots_status = self._robots(client, request.start_url)
-            browser = None
-            browser_page = None
-            playwright = None
-            if self.settings.render_enabled:
-                try:
-                    from playwright.sync_api import sync_playwright
-
-                    playwright = sync_playwright().start()
-                    browser = playwright.chromium.launch(headless=True)
-                    context = browser.new_context(user_agent=self.settings.user_agent, java_script_enabled=True)
-                    browser_page = context.new_page()
-                except Exception:
-                    browser_page = None
-            try:
-                while not frontier.is_complete() and len(pages) < request.max_urls:
-                    if cancellation_token and cancellation_token.is_cancelled():
-                        break
-                    entry = frontier.get_next()
-                    if entry is None:
-                        if frontier.is_complete():
-                            break
-                        time.sleep(0.02)
-                        continue
-                    url = entry.url
-                    depth = entry.depth
-                    parent_url = entry.parent_url
-                    if not robots.can_fetch(self.settings.user_agent, url):
-                        frontier.mark_skipped(url, reason="robots_disallowed")
-                        pages.append(
-                            PageRecord(
-                                url=url, final_url=url, depth=depth, parent_url=parent_url, status_code=None, content_type="", title="", description="", headings={}, canonical="",
-                                meta_robots="", x_robots="", source_html="", rendered_html="", rendered_text="", images=[], structured_data=[],
-                                redirect_chain=[], fetch_error="", render_error="", robots_allowed=False, discovered_at=self._now(), content_hash="",
-                                normalized_url=url, fetch_strategy="static", crawler_engine="serial", response_bytes=0, duration_ms=0.0,
-                                error_category="robots_disallowed", headers={},
-                            )
-                        )
-                        progress(len(pages), frontier.queue_size, robots_status)
-                        continue
-                    pause = request.delay_seconds - (time.monotonic() - last_request_at)
-                    if pause > 0:
-                        time.sleep(pause)
-                    response, redirect_chain, fetch_error = self._fetch(client, url)
-                    last_request_at = time.monotonic()
-                    if not response:
-                        frontier.mark_failed(url, fetch_error, is_retryable=False)
-                        pages.append(self._error_page(url, redirect_chain, fetch_error, "serial", depth=depth, parent_url=parent_url))
-                        progress(len(pages), frontier.queue_size, robots_status)
-                        continue
-
-                    final_url = normalize_url(str(response.url), allow_private=getattr(self.settings, "allow_private_crawls", False))
-                    if final_url != url:
-                        frontier.handle_redirect(url, final_url, depth, parent_url, enqueue_target=False)
-
-                    page, page_links = self._build_page(request, url, response, redirect_chain, fetch_error, browser_page, parent_url=parent_url, depth=depth)
-
-                    # Deduplication detection
-                    is_dup = False
-                    dup_of = ""
-                    if page.canonical and page.canonical != page.final_url:
-                        is_canon_dup = frontier.handle_canonical(page.final_url, page.canonical)
-                        if is_canon_dup:
-                            is_dup = True
-                            dup_of = page.canonical
-                        elif page.canonical in seen_canonicals:
-                            is_dup = True
-                            dup_of = seen_canonicals[page.canonical]
-                        else:
-                            seen_canonicals[page.canonical] = page.final_url
-                    elif page.content_hash and page.content_hash in seen_content_hashes and (page.rendered_text or page.extracted_text or page.source_html):
-                        is_dup = True
-                        dup_of = seen_content_hashes[page.content_hash]
-                    else:
-                        if page.canonical:
-                            seen_canonicals[page.canonical] = page.final_url
-                        if page.content_hash:
-                            seen_content_hashes[page.content_hash] = page.final_url
-                    page.is_duplicate = is_dup
-                    page.duplicate_of = dup_of
-
-                    if is_dup:
-                        frontier.mark_duplicate(url, dup_of)
-                    elif response.status_code and response.status_code >= 400:
-                        frontier.mark_failed(url, f"HTTP {response.status_code}", is_retryable=False)
-                    else:
-                        frontier.mark_completed(url, status_code=response.status_code or 200)
-
-                    links.extend(page_links)
-                    pages.append(page)
-                    self._enqueue_discovered(request, page, page_links, frontier, pagination_counts)
-                    progress(len(pages), frontier.queue_size, robots_status)
-            finally:
-                if browser:
-                    browser.close()
-                if playwright:
-                    playwright.stop()
-
-        pages_to_return = pages[: request.max_urls]
-        finished_at = self._now()
-        duration_ms = (time.monotonic() - start_time) * 1000.0
-        pages_succeeded = sum(1 for p in pages_to_return if p.status_code and p.status_code < 400 and p.robots_allowed and not p.fetch_error)
-        pages_failed = len(pages_to_return) - pages_succeeded
-        requested_fetch_mode = "browser" if self.settings.render_enabled else "static"
-        actual_fetch_mode = "browser" if (self.settings.render_enabled and browser_page is not None) else "static"
-        fallback_occurred = (requested_fetch_mode == "browser" and actual_fetch_mode == "static")
-        fallback_reason = "Playwright/Chromium was unavailable for rendering; fell back to static fetch." if fallback_occurred else ""
-        cancelled = bool(cancellation_token and cancellation_token.is_cancelled())
-        status = CrawlStatus.CANCELLED.value if cancelled else CrawlStatus.SUCCESS.value
-        if not cancelled and pages_failed > 0:
-            status = CrawlStatus.PARTIAL.value if pages_succeeded > 0 else CrawlStatus.FAILED.value
-
-        termination_reason = (
-            f"cancelled: {cancellation_token.reason or 'Cooperative cancellation requested'}"
-            if cancelled
-            else ("max_urls_reached" if len(pages) >= request.max_urls else "queue_empty")
-        )
-
-        accounting = frontier.reconcile_accounting()
-
-        return CrawlResult(
-            crawl_id=getattr(request, "crawl_id", ""),
-            requested_engine="serial",
-            actual_engine="serial",
-            requested_fetch_mode=requested_fetch_mode,
-            actual_fetch_mode=actual_fetch_mode,
-            fallback_occurred=fallback_occurred,
-            fallback_reason=fallback_reason,
-            started_at=started_at,
-            finished_at=finished_at,
-            duration_ms=duration_ms,
-            status=status,
-            termination_reason=termination_reason,
-            pages_discovered=frontier.total_discovered,
-            pages_attempted=len(pages_to_return),
-            pages_succeeded=pages_succeeded,
-            pages_failed=pages_failed,
-            pages_skipped=accounting.get("skipped", 0),
-            duplicates_count=sum(1 for p in pages_to_return if p.is_duplicate),
-            retry_count=0,
-            errors=[p.fetch_error for p in pages_to_return if p.fetch_error],
-            pages=pages_to_return,
-            links=links,
-            robots_status=robots_status,
-        )
-
-    @staticmethod
-    def _now() -> str:
-        return datetime.now(UTC).replace(microsecond=0).isoformat()
-
-    @staticmethod
-    def _empty_signals() -> dict[str, object]:
-        return {"title": "", "description": "", "headings": {}, "canonical": "", "meta_robots": "", "images": [], "structured_data": [], "api_entry_points": [], "links": []}
-
     def _enqueue_discovered(
         self,
         request: CrawlRequest,
@@ -665,7 +395,6 @@ class CrawlEngine(CrawlEngine):
         for raw_target in targets:
             if not raw_target:
                 continue
-            # API pagination loop detection & budgeting
             is_pag, base_path, pag_val = detect_api_pagination(raw_target)
             if is_pag and isinstance(pagination_counts, dict):
                 count = pagination_counts.get(base_path, 0)
@@ -677,13 +406,11 @@ class CrawlEngine(CrawlEngine):
         if hasattr(frontier, "discover"):
             frontier.discover(valid_targets, parent_url=page.final_url or page.url, parent_depth=page.depth)
         else:
-            # Legacy deque + set support for internal test compatibility
             queued = pagination_counts if isinstance(pagination_counts, set) else set()
             for raw_t in valid_targets:
                 if raw_t not in queued and len(queued) < request.max_urls:
                     queued.add(raw_t)
                     frontier.append(raw_t)
-
 
     @staticmethod
     def _dedupe_api_entry_points(entries: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -708,17 +435,818 @@ class CrawlEngine(CrawlEngine):
         return result
 
     @staticmethod
-    def _error_page(url: str, redirect_chain: list[dict[str, object]], error: str, engine_mode: str = "serial", depth: int = 0, parent_url: str = "") -> PageRecord:
+    def _error_page(
+        url: str,
+        redirect_chain: list[dict[str, object]],
+        error: str,
+        engine_mode: str = "serial",
+        depth: int = 0,
+        parent_url: str = "",
+    ) -> PageRecord:
         return PageRecord(
             url=url, final_url=url, status_code=None, content_type="", title="", description="", headings={}, canonical="", meta_robots="",
             x_robots="", source_html="", rendered_html="", rendered_text="", images=[], structured_data=[], redirect_chain=redirect_chain,
-            fetch_error=error, render_error="", discovered_at=CrawlEngine._now(), content_hash="",
+            fetch_error=error, render_error="", discovered_at=BaseCrawlerEngine._now(), content_hash="",
             depth=depth, parent_url=parent_url,
             normalized_url=url,
             fetch_strategy="static",
             crawler_engine=engine_mode,
             response_bytes=0,
             duration_ms=0.0,
-            error_category="fetch_error",
+            error_category="fetch_error" if error != "robots_disallowed" else "robots_disallowed",
             headers={},
+            robots_allowed=False if error == "robots_disallowed" else True,
         )
+
+    def _process_and_record_page(
+        self,
+        request: CrawlRequest,
+        frontier: CrawlFrontier,
+        page: PageRecord,
+        page_links: list[LinkRecord],
+        pages: list[PageRecord],
+        links: list[LinkRecord],
+        seen_canonicals: dict[str, str],
+        seen_content_hashes: dict[str, str],
+        pagination_counts: dict[str, int],
+    ) -> None:
+        if page.final_url and page.final_url != page.url:
+            frontier.handle_redirect(page.url, page.final_url, page.depth, page.parent_url, enqueue_target=False)
+
+        is_dup = False
+        dup_of = ""
+        if page.canonical and page.canonical != page.final_url:
+            is_canon_dup = frontier.handle_canonical(page.final_url, page.canonical)
+            if is_canon_dup:
+                is_dup = True
+                dup_of = page.canonical
+            elif page.canonical in seen_canonicals:
+                is_dup = True
+                dup_of = seen_canonicals[page.canonical]
+            else:
+                seen_canonicals[page.canonical] = page.final_url
+        elif page.content_hash and page.content_hash in seen_content_hashes and (page.rendered_text or page.extracted_text or page.source_html):
+            is_dup = True
+            dup_of = seen_content_hashes[page.content_hash]
+        else:
+            if page.canonical:
+                seen_canonicals[page.canonical] = page.final_url
+            if page.content_hash:
+                seen_content_hashes[page.content_hash] = page.final_url
+
+        page.is_duplicate = is_dup
+        page.duplicate_of = dup_of
+
+        if is_dup:
+            frontier.mark_duplicate(page.url, dup_of)
+        elif page.status_code and page.status_code >= 400:
+            frontier.mark_failed(page.url, f"HTTP {page.status_code}", is_retryable=False)
+        elif page.fetch_error:
+            frontier.mark_failed(page.url, page.fetch_error, is_retryable=False)
+        else:
+            frontier.mark_completed(page.url, status_code=page.status_code or 200)
+
+        pages.append(page)
+        links.extend(page_links)
+        self._enqueue_discovered(request, page, page_links, frontier, pagination_counts)
+
+    def _build_crawl_result(
+        self,
+        request: CrawlRequest,
+        engine_name: str,
+        fetch_strategy: str,
+        pages: list[PageRecord],
+        links: list[LinkRecord],
+        frontier: CrawlFrontier,
+        robots_status: str,
+        start_time: float,
+        started_at: str,
+        cancellation_token: CancellationToken | None,
+        fatal_error: str = "",
+    ) -> CrawlResult:
+        pages_to_return = pages[: request.max_urls]
+        finished_at = self._now()
+        duration_ms = (time.monotonic() - start_time) * 1000.0
+        pages_succeeded = sum(1 for p in pages_to_return if p.status_code and p.status_code < 400 and p.robots_allowed and not p.fetch_error)
+        pages_failed = len(pages_to_return) - pages_succeeded
+        if fatal_error and not pages_failed:
+            pages_failed = 1
+
+        fallback_occurred = bool(self.settings.render_enabled and fetch_strategy != "browser")
+        fallback_reason = "Browser rendering is unsupported in multi-worker static executor; fell back to static fetch." if fallback_occurred else ""
+        cancelled = bool(cancellation_token and cancellation_token.is_cancelled())
+
+        if fatal_error:
+            status = CrawlStatus.FAILED.value
+            termination_reason = f"fatal_engine_error: {fatal_error}"
+        elif cancelled:
+            status = CrawlStatus.CANCELLED.value
+            termination_reason = f"cancelled: {cancellation_token.reason or 'Cooperative cancellation requested'}"
+        elif pages_failed > 0:
+            status = CrawlStatus.PARTIAL.value if pages_succeeded > 0 else CrawlStatus.FAILED.value
+            termination_reason = "max_urls_reached" if len(pages) >= request.max_urls else "queue_empty"
+        else:
+            status = CrawlStatus.SUCCESS.value
+            termination_reason = "max_urls_reached" if len(pages) >= request.max_urls else "queue_empty"
+
+        accounting = frontier.reconcile_accounting()
+        errors = [p.fetch_error for p in pages_to_return if p.fetch_error]
+        if fatal_error:
+            errors.append(fatal_error)
+
+        return CrawlResult(
+            crawl_id=getattr(request, "crawl_id", ""),
+            requested_engine=getattr(request, "executor_mode", engine_name) or engine_name,
+            actual_engine=engine_name,
+            requested_fetch_mode="browser" if self.settings.render_enabled else "static",
+            actual_fetch_mode=fetch_strategy,
+            fallback_occurred=fallback_occurred,
+            fallback_reason=fallback_reason,
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_ms=duration_ms,
+            status=status,
+            termination_reason=termination_reason,
+            pages_discovered=frontier.total_discovered,
+            pages_attempted=len(pages_to_return),
+            pages_succeeded=pages_succeeded,
+            pages_failed=pages_failed,
+            pages_skipped=accounting.get("skipped", 0),
+            duplicates_count=sum(1 for p in pages_to_return if p.is_duplicate),
+            retry_count=0,
+            errors=errors,
+            pages=pages_to_return,
+            links=links,
+            robots_status=robots_status,
+        )
+
+
+class CrawlEngine(BaseCrawlerEngine):
+    """Unified CrawlEngine implementing CrawlerEngineProtocol and managing concrete engines."""
+
+    def _executor_mode(self, request: CrawlRequest) -> str:
+        return request.executor_mode or self.settings.crawl_executor_mode
+
+    def _worker_count(self, request: CrawlRequest) -> int:
+        mode = self._executor_mode(request)
+        if mode == "async":
+            return self.settings.async_concurrency
+        if mode == "thread":
+            return self.settings.thread_workers
+        if mode == "process":
+            return self.settings.process_workers
+        return 1
+
+    def run(
+        self,
+        request: CrawlRequest,
+        progress: callable,
+        cancellation_token: CancellationToken | None = None,
+    ) -> CrawlResult:
+        if not request.acknowledgment:
+            raise ValueError("Ownership or permission acknowledgement is required before a crawl can start.")
+        mode = self._executor_mode(request)
+        self.extraction_profile = load_profile(request.extraction_profile_path or self.settings.extraction_profile_path)
+        if mode not in {"serial", "thread", "async", "process"}:
+            raise ValueError(f"Crawl executor mode must be serial, thread, async, or process; got {mode}.")
+
+        if mode == "serial":
+            return self._run_serial(request, progress, cancellation_token)
+        elif mode == "thread":
+            return self._run_threaded(request, progress, cancellation_token)
+        elif mode == "async":
+            return self._run_coroutine(request, progress, cancellation_token)
+        elif mode == "process":
+            return self._run_multiprocess(request, progress, cancellation_token)
+
+    def _run_serial(
+        self,
+        request: CrawlRequest,
+        progress: callable,
+        cancellation_token: CancellationToken | None = None,
+    ) -> CrawlResult:
+        start_time = time.monotonic()
+        started_at = self._now()
+        frontier = CrawlFrontier(
+            start_url=request.start_url,
+            max_urls=request.max_urls,
+            max_depth=getattr(request, "max_depth", 10),
+            mode=request.mode,
+            url_list=request.url_list,
+            allow_private=getattr(self.settings, "allow_private_crawls", False),
+            max_retries=self.settings.max_request_retries,
+            retry_backoff_seconds=self.settings.retry_backoff_seconds,
+        )
+        pages: list[PageRecord] = []
+        links: list[LinkRecord] = []
+        seen_content_hashes: dict[str, str] = {}
+        seen_canonicals: dict[str, str] = {}
+        pagination_counts: dict[str, int] = {}
+        last_request_at = 0.0
+
+        headers = {
+            "User-Agent": self.settings.user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json,application/xml,text/csv",
+        }
+
+        with httpx.Client(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
+            robots, robots_status = self._robots(client, request.start_url)
+            browser = None
+            browser_page = None
+            playwright = None
+            if self.settings.render_enabled:
+                try:
+                    from playwright.sync_api import sync_playwright
+
+                    playwright = sync_playwright().start()
+                    browser = playwright.chromium.launch(headless=True)
+                    context = browser.new_context(user_agent=self.settings.user_agent, java_script_enabled=True)
+                    browser_page = context.new_page()
+                except Exception:
+                    browser_page = None
+
+            try:
+                while not frontier.is_complete() and len(pages) < request.max_urls:
+                    if cancellation_token and cancellation_token.is_cancelled():
+                        break
+                    entry = frontier.get_next()
+                    if entry is None:
+                        if frontier.is_complete():
+                            break
+                        time.sleep(0.01)
+                        continue
+
+                    url = entry.url
+                    depth = entry.depth
+                    parent_url = entry.parent_url
+
+                    if not robots.can_fetch(self.settings.user_agent, url):
+                        frontier.mark_skipped(url, reason="robots_disallowed")
+                        pages.append(self._error_page(url, [], "robots_disallowed", "serial", depth=depth, parent_url=parent_url))
+                        progress(len(pages), frontier.queue_size, robots_status)
+                        continue
+
+                    pause = request.delay_seconds - (time.monotonic() - last_request_at)
+                    if pause > 0:
+                        time.sleep(pause)
+
+                    t_start = time.monotonic()
+                    response, redirect_chain, fetch_error = self._fetch(client, url)
+                    t_end = time.monotonic()
+                    last_request_at = time.monotonic()
+
+                    page, page_links = self._build_page(
+                        request, url, response, redirect_chain, fetch_error, browser_page,
+                        parent_url=parent_url, depth=depth, engine_mode="serial",
+                    )
+                    page.duration_ms = (t_end - t_start) * 1000.0
+
+                    self._process_and_record_page(
+                        request, frontier, page, page_links, pages, links,
+                        seen_canonicals, seen_content_hashes, pagination_counts,
+                    )
+                    progress(len(pages), frontier.queue_size, robots_status)
+            finally:
+                if browser:
+                    browser.close()
+                if playwright:
+                    playwright.stop()
+
+        actual_fetch_mode = "browser" if (self.settings.render_enabled and browser_page is not None) else "static"
+        return self._build_crawl_result(
+            request, "serial", actual_fetch_mode, pages, links, frontier,
+            robots_status, start_time, started_at, cancellation_token,
+        )
+
+    def _run_threaded(
+        self,
+        request: CrawlRequest,
+        progress: callable,
+        cancellation_token: CancellationToken | None = None,
+    ) -> CrawlResult:
+        workers = max(1, self.settings.thread_workers)
+        start_time = time.monotonic()
+        started_at = self._now()
+        frontier = CrawlFrontier(
+            start_url=request.start_url,
+            max_urls=request.max_urls,
+            max_depth=getattr(request, "max_depth", 10),
+            mode=request.mode,
+            url_list=request.url_list,
+            allow_private=getattr(self.settings, "allow_private_crawls", False),
+            max_retries=self.settings.max_request_retries,
+            retry_backoff_seconds=self.settings.retry_backoff_seconds,
+        )
+        pages: list[PageRecord] = []
+        links: list[LinkRecord] = []
+        seen_content_hashes: dict[str, str] = {}
+        seen_canonicals: dict[str, str] = {}
+        pagination_counts: dict[str, int] = {}
+        throttler = DomainPolitenessThrottler(request.delay_seconds)
+
+        headers = {
+            "User-Agent": self.settings.user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json,application/xml,text/csv",
+        }
+
+        transport = httpx.HTTPTransport(
+            retries=self.settings.max_request_retries,
+            limits=httpx.Limits(max_connections=workers * 2, max_keepalive_connections=workers, keepalive_expiry=30.0),
+        )
+
+        with httpx.Client(transport=transport, headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
+            robots, robots_status = self._robots(client, request.start_url)
+
+            def _thread_worker_fetch(target_url: str) -> tuple[str, httpx.Response | None, list[dict[str, object]], str, float, float]:
+                throttler.throttle(target_url)
+                t_start = time.monotonic()
+                if self._is_fetch_one_sync_overridden():
+                    url, payload, chain, err = self._fetch_one_sync(target_url)
+                    t_end = time.monotonic()
+                    resp = None
+                    if payload is not None:
+                        status_code, resp_headers, content, final_url = payload
+                        resp = httpx.Response(status_code, headers=resp_headers, content=content, request=httpx.Request("GET", final_url))
+                    return target_url, resp, chain, err, t_start, t_end
+                resp, chain, err = self._fetch(client, target_url)
+                t_end = time.monotonic()
+                return target_url, resp, chain, err, t_start, t_end
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="crawl-worker") as executor:
+                in_flight: dict[concurrent.futures.Future, FrontierEntry] = {}
+
+                while not frontier.is_complete() and len(pages) < request.max_urls:
+                    if cancellation_token and cancellation_token.is_cancelled():
+                        break
+
+                    while len(in_flight) < workers and not frontier.is_complete():
+                        entry = frontier.get_next()
+                        if entry is None:
+                            break
+                        if not robots.can_fetch(self.settings.user_agent, entry.url):
+                            frontier.mark_skipped(entry.url, reason="robots_disallowed")
+                            pages.append(self._error_page(entry.url, [], "robots_disallowed", "thread", depth=entry.depth, parent_url=entry.parent_url))
+                            progress(len(pages), frontier.queue_size, robots_status)
+                            continue
+
+                        fut = executor.submit(_thread_worker_fetch, entry.url)
+                        in_flight[fut] = entry
+
+                    if not in_flight:
+                        if frontier.is_complete():
+                            break
+                        time.sleep(0.01)
+                        continue
+
+                    done, _ = concurrent.futures.wait(
+                        in_flight.keys(),
+                        timeout=0.05,
+                        return_when=concurrent.futures.FIRST_COMPLETED,
+                    )
+
+                    for fut in done:
+                        orig_entry = in_flight.pop(fut)
+                        try:
+                            url, resp, chain, err, t_start, t_end = fut.result()
+                        except Exception as exc:
+                            url, resp, chain, err = orig_entry.url, None, [], f"WorkerThreadException: {exc}"
+                            t_start, t_end = time.monotonic(), time.monotonic()
+
+                        page, page_links = self._build_page(
+                            request, orig_entry.url, resp, chain, err,
+                            parent_url=orig_entry.parent_url, depth=orig_entry.depth, engine_mode="thread",
+                        )
+                        page.duration_ms = (t_end - t_start) * 1000.0
+                        page.headers["x-fetch-start"] = str(t_start)
+                        page.headers["x-fetch-end"] = str(t_end)
+
+                        self._process_and_record_page(
+                            request, frontier, page, page_links, pages, links,
+                            seen_canonicals, seen_content_hashes, pagination_counts,
+                        )
+                        progress(len(pages), frontier.queue_size, robots_status)
+
+                if cancellation_token and cancellation_token.is_cancelled():
+                    for f in in_flight:
+                        f.cancel()
+
+        return self._build_crawl_result(
+            request, "thread", "static", pages, links, frontier,
+            robots_status, start_time, started_at, cancellation_token,
+        )
+
+    def _run_coroutine(
+        self,
+        request: CrawlRequest,
+        progress: callable,
+        cancellation_token: CancellationToken | None = None,
+    ) -> CrawlResult:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(
+                    asyncio.run,
+                    self._run_async(request, progress, cancellation_token),
+                ).result()
+        else:
+            return asyncio.run(self._run_async(request, progress, cancellation_token))
+
+    async def _run_async(
+        self,
+        request: CrawlRequest,
+        progress: callable,
+        cancellation_token: CancellationToken | None,
+    ) -> CrawlResult:
+        concurrency = max(1, self.settings.async_concurrency)
+        start_time = time.monotonic()
+        started_at = self._now()
+        frontier = CrawlFrontier(
+            start_url=request.start_url,
+            max_urls=request.max_urls,
+            max_depth=getattr(request, "max_depth", 10),
+            mode=request.mode,
+            url_list=request.url_list,
+            allow_private=getattr(self.settings, "allow_private_crawls", False),
+            max_retries=self.settings.max_request_retries,
+            retry_backoff_seconds=self.settings.retry_backoff_seconds,
+        )
+        pages: list[PageRecord] = []
+        links: list[LinkRecord] = []
+        seen_content_hashes: dict[str, str] = {}
+        seen_canonicals: dict[str, str] = {}
+        pagination_counts: dict[str, int] = {}
+        throttler = AsyncDomainPolitenessThrottler(request.delay_seconds)
+
+        headers = {
+            "User-Agent": self.settings.user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json,application/xml,text/csv",
+        }
+
+        if self._is_async_batch_overridden():
+            with httpx.Client(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as sync_client:
+                robots, robots_status = self._robots(sync_client, request.start_url)
+
+            while not frontier.is_complete() and len(pages) < request.max_urls:
+                if cancellation_token and cancellation_token.is_cancelled():
+                    break
+                batch_entries = []
+                while len(batch_entries) < concurrency and not frontier.is_complete():
+                    e = frontier.get_next()
+                    if e is None:
+                        break
+                    if not robots.can_fetch(self.settings.user_agent, e.url):
+                        frontier.mark_skipped(e.url, reason="robots_disallowed")
+                        pages.append(self._error_page(e.url, [], "robots_disallowed", "async", depth=e.depth, parent_url=e.parent_url))
+                        progress(len(pages), frontier.queue_size, robots_status)
+                        continue
+                    batch_entries.append(e)
+
+                if not batch_entries:
+                    break
+
+                results = await self._async_batch([e.url for e in batch_entries], request.delay_seconds)
+                for e, res in zip(batch_entries, results):
+                    url, payload, chain, err = res
+                    resp = None
+                    if payload is not None:
+                        status_code, resp_headers, content, final_url = payload
+                        resp = httpx.Response(status_code, headers=resp_headers, content=content, request=httpx.Request("GET", final_url))
+                    page, page_links = self._build_page(
+                        request, e.url, resp, chain, err, None,
+                        e.parent_url, e.depth, "async",
+                    )
+                    self._process_and_record_page(
+                        request, frontier, page, page_links, pages, links,
+                        seen_canonicals, seen_content_hashes, pagination_counts,
+                    )
+                    progress(len(pages), frontier.queue_size, robots_status)
+
+            return self._build_crawl_result(
+                request, "async", "static", pages, links, frontier,
+                robots_status, start_time, started_at, cancellation_token,
+            )
+
+        transport = httpx.AsyncHTTPTransport(
+            retries=self.settings.max_request_retries,
+            limits=httpx.Limits(max_connections=concurrency * 2, max_keepalive_connections=concurrency, keepalive_expiry=30.0),
+        )
+
+        async with httpx.AsyncClient(transport=transport, headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
+            robots, robots_status = await self._async_robots(client, request.start_url)
+
+            async def _async_worker_fetch(target_url: str) -> tuple[str, httpx.Response | None, list[dict[str, object]], str, float, float]:
+                await throttler.throttle(target_url)
+                t_start = time.monotonic()
+                resp, chain, err = await self._async_fetch(client, target_url)
+                t_end = time.monotonic()
+                return target_url, resp, chain, err, t_start, t_end
+
+            active_tasks: dict[asyncio.Task, FrontierEntry] = {}
+
+            while not frontier.is_complete() and len(pages) < request.max_urls:
+                if cancellation_token and cancellation_token.is_cancelled():
+                    break
+
+                while len(active_tasks) < concurrency and not frontier.is_complete():
+                    entry = frontier.get_next()
+                    if entry is None:
+                        break
+                    if not robots.can_fetch(self.settings.user_agent, entry.url):
+                        frontier.mark_skipped(entry.url, reason="robots_disallowed")
+                        pages.append(self._error_page(entry.url, [], "robots_disallowed", "async", depth=entry.depth, parent_url=entry.parent_url))
+                        progress(len(pages), frontier.queue_size, robots_status)
+                        continue
+
+                    task = asyncio.create_task(_async_worker_fetch(entry.url))
+                    active_tasks[task] = entry
+
+                if not active_tasks:
+                    if frontier.is_complete():
+                        break
+                    await asyncio.sleep(0.01)
+                    continue
+
+                done, _ = await asyncio.wait(
+                    active_tasks.keys(),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                for finished_task in done:
+                    orig_entry = active_tasks.pop(finished_task)
+                    try:
+                        url, resp, chain, err, t_start, t_end = finished_task.result()
+                    except Exception as exc:
+                        url, resp, chain, err = orig_entry.url, None, [], f"CoroutineException: {exc}"
+                        t_start, t_end = time.monotonic(), time.monotonic()
+
+                    page, page_links = await asyncio.to_thread(
+                        self._build_page,
+                        request, orig_entry.url, resp, chain, err, None,
+                        orig_entry.parent_url, orig_entry.depth, "async",
+                    )
+                    page.duration_ms = (t_end - t_start) * 1000.0
+                    page.headers["x-fetch-start"] = str(t_start)
+                    page.headers["x-fetch-end"] = str(t_end)
+
+                    self._process_and_record_page(
+                        request, frontier, page, page_links, pages, links,
+                        seen_canonicals, seen_content_hashes, pagination_counts,
+                    )
+                    progress(len(pages), frontier.queue_size, robots_status)
+
+            if active_tasks:
+                for t in active_tasks:
+                    t.cancel()
+                await asyncio.gather(*active_tasks.keys(), return_exceptions=True)
+
+        return self._build_crawl_result(
+            request, "async", "static", pages, links, frontier,
+            robots_status, start_time, started_at, cancellation_token,
+        )
+
+    def _run_multiprocess(
+        self,
+        request: CrawlRequest,
+        progress: callable,
+        cancellation_token: CancellationToken | None = None,
+    ) -> CrawlResult:
+        workers = max(1, self.settings.process_workers)
+        start_time = time.monotonic()
+        started_at = self._now()
+        parent_pid = os.getpid()
+
+        frontier = CrawlFrontier(
+            start_url=request.start_url,
+            max_urls=request.max_urls,
+            max_depth=getattr(request, "max_depth", 10),
+            mode=request.mode,
+            url_list=request.url_list,
+            allow_private=getattr(self.settings, "allow_private_crawls", False),
+            max_retries=self.settings.max_request_retries,
+            retry_backoff_seconds=self.settings.retry_backoff_seconds,
+        )
+        pages: list[PageRecord] = []
+        links: list[LinkRecord] = []
+        seen_content_hashes: dict[str, str] = {}
+        seen_canonicals: dict[str, str] = {}
+        pagination_counts: dict[str, int] = {}
+        fatal_error = ""
+
+        headers = {
+            "User-Agent": self.settings.user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json,application/xml,text/csv",
+        }
+
+        with httpx.Client(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
+            robots, robots_status = self._robots(client, request.start_url)
+
+        if self._is_fetch_one_sync_overridden():
+            while not frontier.is_complete() and len(pages) < request.max_urls:
+                if cancellation_token and cancellation_token.is_cancelled():
+                    break
+                entry = frontier.get_next()
+                if entry is None:
+                    break
+                if not robots.can_fetch(self.settings.user_agent, entry.url):
+                    frontier.mark_skipped(entry.url, reason="robots_disallowed")
+                    pages.append(self._error_page(entry.url, [], "robots_disallowed", "process", depth=entry.depth, parent_url=entry.parent_url))
+                    progress(len(pages), frontier.queue_size, robots_status)
+                    continue
+                t_start = time.monotonic()
+                url, payload, chain, err = self._fetch_one_sync(entry.url)
+                t_end = time.monotonic()
+                resp = None
+                if payload is not None:
+                    status_code, resp_headers, content, final_url = payload
+                    resp = httpx.Response(status_code, headers=resp_headers, content=content, request=httpx.Request("GET", final_url))
+                page, page_links = self._build_page(
+                    request, entry.url, resp, chain, err,
+                    parent_url=entry.parent_url, depth=entry.depth, engine_mode="process",
+                )
+                page.duration_ms = (t_end - t_start) * 1000.0
+                self._process_and_record_page(
+                    request, frontier, page, page_links, pages, links,
+                    seen_canonicals, seen_content_hashes, pagination_counts,
+                )
+                progress(len(pages), frontier.queue_size, robots_status)
+
+            return self._build_crawl_result(
+                request, "process", "static", pages, links, frontier,
+                robots_status, start_time, started_at, cancellation_token,
+            )
+
+        mp_context = multiprocessing.get_context("spawn")
+        try:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=workers, mp_context=mp_context) as executor:
+                in_flight: dict[concurrent.futures.Future, FrontierEntry] = {}
+
+                while not frontier.is_complete() and len(pages) < request.max_urls:
+                    if cancellation_token and cancellation_token.is_cancelled():
+                        break
+
+                    while len(in_flight) < workers and not frontier.is_complete():
+                        entry = frontier.get_next()
+                        if entry is None:
+                            break
+                        if not robots.can_fetch(self.settings.user_agent, entry.url):
+                            frontier.mark_skipped(entry.url, reason="robots_disallowed")
+                            pages.append(self._error_page(entry.url, [], "robots_disallowed", "process", depth=entry.depth, parent_url=entry.parent_url))
+                            progress(len(pages), frontier.queue_size, robots_status)
+                            continue
+
+                        task_dict = {
+                            "url": entry.url,
+                            "depth": entry.depth,
+                            "parent_url": entry.parent_url,
+                            "start_url": request.start_url,
+                            "user_agent": self.settings.user_agent,
+                            "timeout_seconds": self.settings.request_timeout_seconds,
+                            "max_retries": self.settings.max_request_retries,
+                            "retry_backoff_seconds": self.settings.retry_backoff_seconds,
+                            "max_redirects": self.settings.max_redirects,
+                            "delay_seconds": request.delay_seconds,
+                            "max_document_bytes": self.settings.max_document_bytes,
+                            "allow_private": getattr(self.settings, "allow_private_crawls", False),
+                        }
+
+                        try:
+                            fut = executor.submit(execute_worker_crawl_task, task_dict)
+                            in_flight[fut] = entry
+                        except BrokenProcessPool as bpp:
+                            fatal_error = f"BrokenProcessPool: {bpp}"
+                            break
+
+                    if fatal_error:
+                        break
+
+                    if not in_flight:
+                        if frontier.is_complete():
+                            break
+                        time.sleep(0.01)
+                        continue
+
+                    try:
+                        done, _ = concurrent.futures.wait(
+                            in_flight.keys(),
+                            timeout=0.05,
+                            return_when=concurrent.futures.FIRST_COMPLETED,
+                        )
+                    except BrokenProcessPool as bpp:
+                        fatal_error = f"BrokenProcessPool: {bpp}"
+                        break
+
+                    for fut in done:
+                        orig_entry = in_flight.pop(fut)
+                        try:
+                            res = fut.result()
+                            worker_links = [LinkRecord(**l) for l in res.get("links", [])]
+                            res_clean = dict(res)
+                            res_clean.pop("links", None)
+                            worker_pid = res_clean.pop("worker_pid", None)
+                            t_start = res_clean.pop("t_start", 0.0)
+                            t_end = res_clean.pop("t_end", 0.0)
+
+                            page = PageRecord(**normalize_page_payload(res_clean))
+                            if worker_pid:
+                                page.headers["x-worker-pid"] = str(worker_pid)
+                            page.headers["x-parent-pid"] = str(parent_pid)
+                            if t_start and t_end:
+                                page.headers["x-fetch-start"] = str(t_start)
+                                page.headers["x-fetch-end"] = str(t_end)
+
+                            self._process_and_record_page(
+                                request, frontier, page, worker_links, pages, links,
+                                seen_canonicals, seen_content_hashes, pagination_counts,
+                            )
+                        except Exception as exc:
+                            err_page = self._error_page(
+                                orig_entry.url, [], f"MultiprocessTaskException: {exc}",
+                                engine_mode="process", depth=orig_entry.depth, parent_url=orig_entry.parent_url,
+                            )
+                            pages.append(err_page)
+                            frontier.mark_failed(orig_entry.url, str(exc), is_retryable=False)
+
+                        progress(len(pages), frontier.queue_size, robots_status)
+
+                if cancellation_token and cancellation_token.is_cancelled():
+                    for f in in_flight:
+                        f.cancel()
+        except Exception as exc:
+            fatal_error = f"{type(exc).__name__}: {exc}"
+
+        return self._build_crawl_result(
+            request, "process", "static", pages, links, frontier,
+            robots_status, start_time, started_at, cancellation_token,
+            fatal_error=fatal_error,
+        )
+
+    def _materialize_static(self, request: CrawlRequest, result: tuple[str, tuple[int, dict[str, str], bytes, str] | None, list[dict[str, object]], str]) -> tuple[PageRecord, list[LinkRecord]]:
+        url, payload, redirect_chain, fetch_error = result
+        if payload is None:
+            return self._error_page(url, redirect_chain, fetch_error, getattr(request, "executor_mode", "serial")), []
+        status_code, headers, content, final_url = payload
+        response = httpx.Response(status_code, headers=headers, content=content, request=httpx.Request("GET", final_url))
+        page, page_links = self._build_page(request, url, response, redirect_chain, fetch_error, None)
+        return page, page_links
+
+    def _run_static_mode(self, request: CrawlRequest, progress: callable, cancellation_token: CancellationToken | None = None) -> CrawlResult:
+        mode = self._executor_mode(request)
+        if mode == "thread":
+            return self._run_threaded(request, progress, cancellation_token)
+        elif mode == "async":
+            return self._run_coroutine(request, progress, cancellation_token)
+        elif mode == "process":
+            return self._run_multiprocess(request, progress, cancellation_token)
+        return self._run_serial(request, progress, cancellation_token)
+
+
+class SerialCrawlerEngine(CrawlEngine):
+    """Genuinely single-threaded, serial crawler engine."""
+
+    def run(
+        self,
+        request: CrawlRequest,
+        progress: callable,
+        cancellation_token: CancellationToken | None = None,
+    ) -> CrawlResult:
+        return self._run_serial(request, progress, cancellation_token)
+
+
+class ThreadedCrawlerEngine(CrawlEngine):
+    """Genuinely multi-threaded crawler engine with persistent connection pooling."""
+
+    def run(
+        self,
+        request: CrawlRequest,
+        progress: callable,
+        cancellation_token: CancellationToken | None = None,
+    ) -> CrawlResult:
+        return self._run_threaded(request, progress, cancellation_token)
+
+
+class CoroutineCrawlerEngine(CrawlEngine):
+    """Genuinely non-blocking coroutine crawler engine with persistent event loop and AsyncClient."""
+
+    def run(
+        self,
+        request: CrawlRequest,
+        progress: callable,
+        cancellation_token: CancellationToken | None = None,
+    ) -> CrawlResult:
+        return self._run_coroutine(request, progress, cancellation_token)
+
+
+class MultiprocessCrawlerEngine(CrawlEngine):
+    """Genuinely multi-process crawler engine with socket fetching and parsing in spawned worker processes."""
+
+    def run(
+        self,
+        request: CrawlRequest,
+        progress: callable,
+        cancellation_token: CancellationToken | None = None,
+    ) -> CrawlResult:
+        return self._run_multiprocess(request, progress, cancellation_token)

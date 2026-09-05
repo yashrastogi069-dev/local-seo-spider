@@ -1,37 +1,46 @@
 # COMPREHENSIVE TEST MATRIX
-
-This document provides a detailed inventory of all 146 automated unit, integration, and security tests across all 26 test modules in `local-seo-spider`.
-
----
-
-## Overall Summary
-- **Total Test Files**: 26
-- **Total Test Cases**: 146
-- **Passed**: 145
-- **Skipped**: 1 (gracefully skipped due to optional `sentence-transformers` dependency)
-- **Failed**: 0
-- **Pass Rate on Active Environment**: 100.0%
-
----
-
-## Detailed Test Module Breakdown
-
-| Module | Type | Tests | Status | Scope & Requirements Covered |
-|:---|:---:|:---:|:---:|:---|
-| [`tests/test_accessibility.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_accessibility.py) | Unit | 1 | PASSED | Accessible HTML markup, ARIA roles, form labels |
-| [`tests/test_agentic.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_agentic.py) | Unit / Int | 4 | PASSED | Multi-hop routing, entity extraction, agentic query plan |
-| [`tests/test_analyzer.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_analyzer.py) | Unit | 2 | PASSED | SEO audit rules, issue prioritization, crawl coverage metrics |
-| [`tests/test_answering.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_answering.py) | Unit | 11 | PASSED | LocalAnswerer, OllamaAnswerer, query type classification, prompt formatting |
-| [`tests/test_app_e2e.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_app_e2e.py) | E2E | 5 | PASSED | FastAPI endpoints, crawl lifecycle, HTML views, question answering |
-| [`tests/test_benchmark_accounting.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_benchmark_accounting.py) | Benchmark | 2 | PASSED | 155-query accounting reconciliation, ID uniqueness, 0 cross-split leakage |
-| [`tests/test_contamination.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_contamination.py) | Security | 3 | PASSED | Zero benchmark case IDs, queries, or target answers hardcoded in app/ |
-| [`tests/test_comparison.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_comparison.py) | Integration | 1 | PASSED | Crawl comparison and differential ledger calculation |
-| [`tests/test_concurrency.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_concurrency.py) | Integration | 3 | PASSED | Threaded static, async coroutine, and multiprocess static crawl execution |
-| [`tests/test_controlled_crawler.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_controlled_crawler.py) | Integration | 12 | PASSED | 19 deterministic server endpoints, circular links termination, A-B-A cycle bounding, fragment deduplication, canonical duplicate detection, external domain exclusion, strict depth hierarchy, page limit enforcement, redirect chain & loops, HTTP error handling, 429 rate limit retry-after |
-| [`tests/test_controls_and_exports.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_controls_and_exports.py) | Integration | 12 | PASSED | CSV/JSON exports, robots.txt exclusions, redirect hops limit, error logging |
-| [`tests/test_crawler_contracts.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_crawler_contracts.py) | Contract | 16 | PASSED | Unified crawler contracts, CrawlStatus enums, sequence unpacking, fallback invariants, picklability, SQLite schema persistence |
-| [`tests/test_documents.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_documents.py) | Unit | 4 | PASSED | HTML, PDF, Markdown text extraction, deep JSON semantics preservation |
-| [`tests/test_embeddings.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_embeddings.py) | Unit | 5 | 4 PASS, 1 SKIP* | Hash embeddings determinism, normalization, cosine bounds, dimension consistency |
+ 
+-This document provides a detailed inventory of all 146 automated unit, integration, and security tests across all 26 test modules in `local-seo-spider`.
++This document provides a detailed inventory of all 240 automated unit, integration, concurrency, and security tests across all 33 test modules in `local-seo-spider`.
+ 
+ ---
+ 
+ ## Overall Summary
+-- **Total Test Files**: 26
+-- **Total Test Cases**: 146
+-- **Passed**: 145
+-- **Skipped**: 1 (gracefully skipped due to optional `sentence-transformers` dependency)
++- **Total Test Files**: 33
++- **Total Test Cases**: 240
++- **Passed**: 238
++- **Skipped**: 2 (gracefully skipped due to optional `sentence-transformers` dependency)
+ - **Failed**: 0
+ - **Pass Rate on Active Environment**: 100.0%
+ 
+ ---
+ 
+ ## Detailed Test Module Breakdown
+ 
+ | Module | Type | Tests | Status | Scope & Requirements Covered |
+ |:---|:---:|:---:|:---:|:---|
+ | [`tests/test_accessibility.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_accessibility.py) | Unit | 1 | PASSED | Accessible HTML markup, ARIA roles, form labels |
+ | [`tests/test_agentic.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_agentic.py) | Unit / Int | 4 | PASSED | Multi-hop routing, entity extraction, agentic query plan |
+ | [`tests/test_analyzer.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_analyzer.py) | Unit | 2 | PASSED | SEO audit rules, issue prioritization, crawl coverage metrics |
+ | [`tests/test_answering.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_answering.py) | Unit | 11 | PASSED | LocalAnswerer, OllamaAnswerer, query type classification, prompt formatting |
+ | [`tests/test_app_e2e.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_app_e2e.py) | E2E | 5 | PASSED | FastAPI endpoints, crawl lifecycle, HTML views, question answering |
+ | [`tests/test_benchmark_accounting.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_benchmark_accounting.py) | Benchmark | 2 | PASSED | 155-query accounting reconciliation, ID uniqueness, 0 cross-split leakage |
+ | [`tests/test_contamination.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_contamination.py) | Security | 3 | PASSED | Zero benchmark case IDs, queries, or target answers hardcoded in app/ |
+ | [`tests/test_comparison.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_comparison.py) | Integration | 1 | PASSED | Crawl comparison and differential ledger calculation |
+ | [`tests/test_concurrency.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_concurrency.py) | Integration | 3 | PASSED | Threaded static, async coroutine, and multiprocess static crawl execution |
++| [`tests/test_concurrency_proof.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_concurrency_proof.py) | Concurrency Proof | 4 | PASSED | Overlapping intervals, server peak concurrency $\ge 2$, distinct child worker PIDs across Serial, Thread, Async, Multiprocess |
+ | [`tests/test_controlled_crawler.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_controlled_crawler.py) | Integration | 12 | PASSED | 19 deterministic server endpoints, circular links termination, A-B-A cycle bounding, fragment deduplication, canonical duplicate detection, external domain exclusion, strict depth hierarchy, page limit enforcement, redirect chain & loops, HTTP error handling, 429 rate limit retry-after |
+ | [`tests/test_controls_and_exports.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_controls_and_exports.py) | Integration | 12 | PASSED | CSV/JSON exports, robots.txt exclusions, redirect hops limit, error logging |
+ | [`tests/test_crawler_contracts.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_crawler_contracts.py) | Contract | 16 | PASSED | Unified crawler contracts, CrawlStatus enums, sequence unpacking, fallback invariants, picklability, SQLite schema persistence |
+ | [`tests/test_documents.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_documents.py) | Unit | 4 | PASSED | HTML, PDF, Markdown text extraction, deep JSON semantics preservation |
+ | [`tests/test_embeddings.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_embeddings.py) | Unit | 5 | 4 PASS, 1 SKIP* | Hash embeddings determinism, normalization, cosine bounds, dimension consistency |
++| [`tests/test_engine_conformance.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_engine_conformance.py) | Conformance | 48 | PASSED | 18 core requirements verified across all 4 engines: seeds, discovery, depth/page limits, duplicates, redirects, 404/500, timeouts, retries, 429, malformed links, external exclusion, cancellation, accounting |
++| [`tests/test_engine_consistency.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_engine_consistency.py) | Parity | 1 | PASSED | Cross-engine parity: all 4 engines yield identical discovered URLs, status codes, depths, and content hashes |
++| [`tests/test_engine_failure_fallback.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_engine_failure_fallback.py) | Resilience | 5 | PASSED | Fail-closed anti-fallback guarantees: invalid modes reject, pool crashes fail explicitly, zero silent serial fallback |
 | [`tests/test_extraction_profiles.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_extraction_profiles.py) | Unit | 2 | PASSED | Custom extraction profiles and schema mappings |
 | [`tests/test_frontier_lifecycle.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_frontier_lifecycle.py) | State Machine | 11 | PASSED | 8-state frontier transitions, illegal transition rejection, terminal idempotency, retry exponential backoff, redirect alias mapping, canonical deduplication, mathematical accounting reconciliation |
 | [`tests/test_job_ledger.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_job_ledger.py) | Integration | 2 | PASSED | Persistent crawl state, job queue, restartability |

@@ -228,6 +228,87 @@ class ControlledHandler(BaseHTTPRequestHandler):
 <html><head><title>Deep Level 3</title></head><body><h1>Level 3 Leaf</h1><a href="/">Back to Root</a></body></html>"""
             self._send_html(200, body)
 
+        elif path.startswith("/slow-concurrency/"):
+            client_pid = self.headers.get("X-Client-PID", "unknown")
+            item_id = path.split("/")[-1]
+            t_start = time.monotonic()
+            
+            # Record server concurrency
+            server_obj = self.server
+            lock = getattr(server_obj, "_concurrency_lock", None)
+            if lock:
+                with lock:
+                    server_obj._active_requests += 1
+                    if server_obj._active_requests > server_obj._peak_concurrency:
+                        server_obj._peak_concurrency = server_obj._active_requests
+
+            delay = float(query.get("delay", "0.25"))
+            time.sleep(delay)
+            t_end = time.monotonic()
+
+            if lock:
+                with lock:
+                    server_obj._active_requests -= 1
+                    server_obj._request_logs.append({
+                        "id": item_id,
+                        "client_pid": client_pid,
+                        "t_start": t_start,
+                        "t_end": t_end,
+                    })
+
+            import json
+            import os
+            resp_body = json.dumps({
+                "id": item_id,
+                "server_pid": os.getpid(),
+                "client_pid": client_pid,
+                "t_start": t_start,
+                "t_end": t_end,
+            })
+            self._send_text(200, resp_body, "application/json")
+
+        elif path == "/timeout":
+            time.sleep(2.0)
+            self._send_html(200, "<html><body><h1>Timeout Finished</h1></body></html>")
+
+        elif path == "/transient-error":
+            server_obj = self.server
+            lock = getattr(server_obj, "_concurrency_lock", None)
+            fails = 1
+            if lock:
+                with lock:
+                    server_obj._transient_fails = getattr(server_obj, "_transient_fails", 0) + 1
+                    fails = server_obj._transient_fails
+            if fails <= 1:
+                self.send_response(503)
+                self.send_header("Retry-After", "0.1")
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"503 Service Unavailable (Transient)")
+            else:
+                self._send_html(200, "<html><body><h1>Transient Recovered</h1></body></html>")
+
+        elif path == "/redirect-301":
+            self.send_response(301)
+            self.send_header("Location", f"{base}/a")
+            self.end_headers()
+
+        elif path in ("/content-dup-1", "/content-dup-2"):
+            body = "<html><head><title>Identical Duplicate Content</title></head><body><h1>Duplicate Body Content</h1><p>Exact same text for content hash deduplication.</p></body></html>"
+            self._send_html(200, body)
+
+        elif path == "/malformed-links":
+            body = """<!DOCTYPE html>
+<html><head><title>Malformed Links Page</title></head>
+<body>
+    <h1>Malformed and Valid Links</h1>
+    <a href="javascript:void(0)">JavaScript Link</a>
+    <a href="mailto:test@example.com">Email Link</a>
+    <a href="http://:invalid">Invalid URI</a>
+    <a href="/a">Valid Page A</a>
+</body></html>"""
+            self._send_html(200, body)
+
         else:
             self._send_text(404, f"404 Not Found: {path}", "text/plain")
 
@@ -259,6 +340,11 @@ class ControlledCrawlerServer:
 
     def start(self) -> str:
         self.server = ThreadingHTTPServer((self.host, self.port), ControlledHandler)
+        self.server._concurrency_lock = threading.Lock()
+        self.server._active_requests = 0
+        self.server._peak_concurrency = 0
+        self.server._request_logs = []
+        self.server._transient_fails = 0
         self.port = self.server.server_port
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -273,6 +359,26 @@ class ControlledCrawlerServer:
     def reset_counts(self) -> None:
         if self.server:
             setattr(self.server, "_429_hits", 0)
+            setattr(self.server, "_transient_fails", 0)
+
+    def reset_concurrency_stats(self) -> None:
+        if self.server:
+            with self.server._concurrency_lock:
+                self.server._active_requests = 0
+                self.server._peak_concurrency = 0
+                self.server._request_logs = []
+
+    def get_peak_concurrency(self) -> int:
+        if self.server:
+            with self.server._concurrency_lock:
+                return getattr(self.server, "_peak_concurrency", 0)
+        return 0
+
+    def get_request_logs(self) -> list[dict]:
+        if self.server:
+            with self.server._concurrency_lock:
+                return list(getattr(self.server, "_request_logs", []))
+        return []
 
     def stop(self) -> None:
         if self.server:

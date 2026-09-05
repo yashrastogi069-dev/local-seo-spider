@@ -4,7 +4,7 @@ All notable changes, phase executions, and architectural transitions for Local S
 
 ---
 
-## Current Status: Phase 0 & 1 Complete, Subphase 2A & 2B Complete / Transitioning to Subphase 2C
+## Current Status: Phases 0, 1, 2A, 2B, 2C Complete / Advancing to Subphase 2D
 
 ### Current Phase State:
 - **PHASE 0 (Baseline & Forensic Audit)**: COMPLETED / PASSED
@@ -12,15 +12,33 @@ All notable changes, phase executions, and architectural transitions for Local S
 - **PHASE 2 (Crawler Core)**: ACTIVE
   - **Subphase 2A (Contracts & State Model)**: COMPLETED / PASSED
   - **Subphase 2B (URL Normalization + Frontier + Crawl Lifecycle)**: COMPLETED / PASSED
-  - **Subphase 2C (Serial + Threaded Engine Hardening & Politeness)**: NEXT IN LINE
-  - **Subphase 2D (Frontier Persistence & Concurrency)**: PENDING
-  - **Subphase 2E (Security & Live Web Soak)**: PENDING
+  - **Subphase 2C (Four Independent Concurrency Engines)**: COMPLETED / PASSED & CERTIFIED
+  - **Subphase 2D (Concurrency, Races, Failure & Resource Safety)**: ACTIVE
+  - **Subphase 2E (Static Fetch + Playwright + Smart Escalation)**: PENDING
 - **PHASE 3 (Universal Extraction)**: PENDING
 - **PHASE 4 (Knowledge/Indexing/Search)**: PENDING
 - **PHASE 5 (RAG Intelligence)**: PENDING
 - **PHASE 6 (Web Intelligence)**: PENDING
 - **PHASE 7 (UI/UX)**: PENDING
 - **PHASE 8 (Final Certification)**: PENDING
+
+---
+
+## [Phase 2C: Four Independent Concurrency Engines] - 2026-09-06
+
+### Added
+- Implemented 4 concrete crawler engines in `app/crawler.py`:
+  - `SerialCrawlerEngine`: Single-threaded, persistent HTTP connection pool.
+  - `ThreadedCrawlerEngine`: Genuine multi-threaded parallel fetching via `ThreadPoolExecutor` and shared `httpx.Client(transport=HTTPTransport(limits=Limits(...)))`.
+  - `CoroutineCrawlerEngine`: Persistent asyncio event loop and `httpx.AsyncClient` session across the entire crawl with bounded semaphore concurrency.
+  - `MultiprocessCrawlerEngine`: Multi-process execution using `spawn` context with child worker tasks running in `app/multiprocess_worker.py`.
+- Created `app/multiprocess_worker.py` top-level worker module for Windows `spawn` picklability, executing genuine socket-level HTTP requests and CPU signal extraction in child processes with `X-Client-PID` and `worker_pid` provenance.
+- Implemented `DomainPolitenessThrottler` (thread-safe per-domain lock) and `AsyncDomainPolitenessThrottler` (async per-domain lock) eliminating global lock thread serialization.
+- Created `tests/test_concurrency_proof.py`: verified overlapping execution intervals, server peak concurrency $\ge 2$, and distinct child worker PIDs across all engines.
+- Created `tests/test_engine_conformance.py`: verified 18 core requirements identically across Serial, Threaded, Coroutine, and Multiprocess engines (48 tests).
+- Created `tests/test_engine_consistency.py`: verified cross-engine result parity (identical URLs, status codes, depths, and content hashes).
+- Created `tests/test_engine_failure_fallback.py`: verified fail-closed anti-silent-fallback guarantees (invalid modes reject, BrokenProcessPool fails explicitly, zero silent serial fallback).
+- Added ADR-011 to `DECISIONS.md`.
 
 ---
 

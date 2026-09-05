@@ -125,3 +125,28 @@ This document records the architectural and engineering decisions made for the L
      - Mathematical frontier accounting reconciliation (`reconcile_accounting`) ensuring zero lost or untracked URLs.
 - **Consequences**: Eliminates crawl loops, prevents redundant fetches, ensures exact depth hierarchy and page budget bounding, and provides thread-safe lifecycle tracking across all execution modes.
 
+---
+
+## ADR-011: Four Independent Concurrency Engines & Anti-Fallback Protocol
+- **Status**: ACCEPTED / VERIFIED
+- **Context**: Prior to Phase 2C, crawler concurrency modes suffered from severe architectural flaws:
+  1. Multiprocess mode was a mirage: URLs were fetched sequentially in the parent thread via a list comprehension, only offloading CPU parsing to `ProcessPoolExecutor`.
+  2. Threaded mode serialized requests during delay sleeps under a single global lock (`thread_gate`).
+  3. Coroutine/async mode recreated the asyncio event loop and `httpx.AsyncClient` per batch, destroying connection pooling and creating massive socket churn.
+  4. Engines had potential silent fallbacks or degraded behavior under error conditions.
+- **Decision**:
+  1. Implement four concrete, genuinely independent engine classes inheriting from `CrawlEngine` / `BaseCrawlerEngine`:
+     - `SerialCrawlerEngine`: Single-threaded, synchronous execution with single persistent `httpx.Client` session.
+     - `ThreadedCrawlerEngine`: Genuine multi-threaded parallel network I/O with long-lived worker pool (`ThreadPoolExecutor`), a persistent thread-safe `httpx.Client` with connection pooling (`httpx.Limits`), and per-domain politeness throttling via `DomainPolitenessThrottler` (ensuring delay on domain A never blocks domain B).
+     - `CoroutineCrawlerEngine`: Persistent asyncio event loop and single persistent `httpx.AsyncClient` session across the entire crawl lifecycle, bounded by `asyncio.Semaphore`, with `AsyncDomainPolitenessThrottler`.
+     - `MultiprocessCrawlerEngine`: Genuine parallel socket-level HTTP requests and CPU signal extraction executed inside spawned child processes (`multiprocessing.get_context("spawn")`) via top-level worker module `app/multiprocess_worker.py`. Child processes report their individual `worker_pid` and send `X-Client-PID` HTTP headers, proving isolation from the coordinator process.
+  2. Fail-closed anti-fallback protocol:
+     - Unrecognized or broken executor modes fail fast with explicit errors.
+     - Worker failures (e.g. `BrokenProcessPool`, socket crashes) are recorded directly on the `CrawlResult` (`status=FAILED`, `actual_engine=requested_engine`, `fallback_occurred=False`).
+     - Never secretly switch or degrade to serial mode under any circumstance.
+  3. Shared Conformance Suite:
+     - 18 core requirements verified across all 4 engines in `tests/test_engine_conformance.py` (48 tests).
+     - Deterministic cross-engine result consistency verified in `tests/test_engine_consistency.py` (identical URLs, status codes, depths, and content hashes).
+     - Concurrency proofs verified in `tests/test_concurrency_proof.py` (overlapping execution intervals, server peak concurrency $\ge 2$, distinct child worker PIDs).
+     - Anti-silent fallback verified in `tests/test_engine_failure_fallback.py`.
+- **Consequences**: Guarantees advertised concurrency models without fake wrappers, provides verifiable parallel performance, and ensures strict operational safety under network and process failures.

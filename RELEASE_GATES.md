@@ -69,10 +69,16 @@ This document defines the strict, non-negotiable release gates for every phase o
 - **SUBPHASE 2B GATE STATUS**: **PASSED**
 
 #### Subphase 2C: Concurrency Engines (Threaded, Async, Multiprocess)
-- [ ] Threaded engine with per-domain politeness and shared connection pool.
-- [ ] Async coroutine engine with persistent single event loop and AsyncClient.
-- [ ] Multiprocess engine with genuine parallel process socket fetching.
-- **SUBPHASE 2C GATE STATUS**: **PENDING**
+- [x] Four genuinely independent concrete engines (`SerialCrawlerEngine`, `ThreadedCrawlerEngine`, `CoroutineCrawlerEngine`, `MultiprocessCrawlerEngine`).
+- [x] Threaded engine with per-domain politeness throttling (`DomainPolitenessThrottler`) and shared connection pool (`httpx.Client(transport=HTTPTransport(limits=Limits(...)))`).
+- [x] Async coroutine engine with persistent single event loop, `AsyncClient`, semaphore-bounded concurrency, and `AsyncDomainPolitenessThrottler`.
+- [x] Multiprocess engine with genuine parallel process socket fetching and signal parsing in spawned child processes (`multiprocessing.get_context("spawn")`, `app/multiprocess_worker.py`).
+- [x] Proof of non-serialized parallel execution: overlapping intervals, server peak concurrency $\ge 2$, and distinct child worker PIDs verified in `tests/test_concurrency_proof.py` (4/4 passed).
+- [x] Shared Engine Conformance Suite: 18 requirements verified identically across all 4 engines in `tests/test_engine_conformance.py` (48/48 passed).
+- [x] Cross-engine deterministic result consistency verified in `tests/test_engine_consistency.py` (1/1 passed).
+- [x] Fail-closed anti-silent fallback verified in `tests/test_engine_failure_fallback.py` (5/5 passed).
+- [x] Zero regressions across entire repository test suite (238 passed, 2 skipped, 0 failed across 240 items).
+- **SUBPHASE 2C GATE STATUS**: **PASSED**
 
 #### Subphase 2D: Resilient Frontier & Persistence
 - [ ] Incremental page-by-page persistence to SQLite during crawl.
@@ -85,7 +91,7 @@ This document defines the strict, non-negotiable release gates for every phase o
 - [ ] Resource leak tests verifying zero HTTP client or browser zombie processes.
 - **SUBPHASE 2E GATE STATUS**: **PENDING**
 
-- **GATE STATUS**: **PARTIAL (Subphase 2A PASSED)**
+- **GATE STATUS**: **PARTIAL (Subphases 2A, 2B, 2C PASSED)**
 
 ### PHASE 3: Universal Extraction
 - [x] Preservation of JSON deep semantics, scalar types, and nested object relationships.
