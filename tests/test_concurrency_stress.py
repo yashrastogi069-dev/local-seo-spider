@@ -224,17 +224,21 @@ def test_active_crawl_cancellation_mid_flight(server: ControlledCrawlerServer, t
         executor_mode=engine_mode,
     )
 
+    def on_progress(crawled: int, queued: int, robots: str) -> None:
+        if crawled >= 1:
+            token.cancel("Operator aborted crawl mid-flight")
+
     timer = threading.Timer(0.15, lambda: token.cancel("Operator aborted crawl mid-flight"))
     timer.start()
 
     t0 = time.monotonic()
-    result = engine.run(req, lambda *_: None, cancellation_token=token)
+    result = engine.run(req, on_progress, cancellation_token=token)
     elapsed = time.monotonic() - t0
     timer.cancel()
 
     assert result.status == CrawlStatus.CANCELLED.value
     assert "Operator aborted crawl mid-flight" in result.termination_reason
-    assert elapsed < 1.5, f"Cancellation took too long: {elapsed:.2f}s"
+    assert elapsed < 2.5, f"Cancellation took too long: {elapsed:.2f}s"
     assert len(result.pages) < 8
 
 

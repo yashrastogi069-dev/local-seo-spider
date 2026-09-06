@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from app.types import (
+    CorruptStateError,
     FrontierEntry,
     FrontierItem,
     FrontierState,
@@ -532,3 +533,130 @@ class CrawlFrontier:
     def retry_count(self) -> int:
         with self._lock:
             return self._retry_count
+
+    def get_entries(self) -> list[FrontierEntry]:
+        """Return a copy of all current frontier entries."""
+        with self._lock:
+            return list(self._entries.values())
+
+    def export_state(self) -> dict[str, Any]:
+        """Export full frontier state for crash recovery checkpointing."""
+        with self._lock:
+            return {
+                "start_url": self.start_url,
+                "max_urls": self.max_urls,
+                "max_depth": self.max_depth,
+                "mode": self.mode,
+                "max_retries": self.max_retries,
+                "retry_backoff_seconds": self.retry_backoff_seconds,
+                "admitted_count": self._admitted_count,
+                "retry_count": self._retry_count,
+                "seen_canonicals": dict(self._seen_canonicals),
+                "alias_map": dict(self._alias_map),
+                "allowed_domains": sorted(self.allowed_domains),
+                "entries": [entry.to_dict() for entry in self._entries.values()],
+                "queue": list(self._queue),
+                "retry_pool_urls": list(self._retry_pool.keys()),
+            }
+
+    def restore_state(
+        self,
+        entries: list[FrontierEntry] | list[dict[str, Any]],
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Restore frontier state from checkpoint, safely recovering in-flight state.
+
+        Any in-flight FETCHING entry is safely recovered to QUEUED and re-enqueued.
+        _active_workers is reset to 0.
+        """
+        with self._lock:
+            self._entries.clear()
+            self._queue.clear()
+            self._retry_pool.clear()
+            self._active_workers = 0
+
+            meta = metadata or {}
+            if "admitted_count" in meta:
+                self._admitted_count = int(meta["admitted_count"])
+            if "retry_count" in meta:
+                self._retry_count = int(meta["retry_count"])
+            if "seen_canonicals" in meta and isinstance(meta["seen_canonicals"], dict):
+                self._seen_canonicals = dict(meta["seen_canonicals"])
+            if "alias_map" in meta and isinstance(meta["alias_map"], dict):
+                self._alias_map = dict(meta["alias_map"])
+            if "allowed_domains" in meta and isinstance(meta["allowed_domains"], (list, set)):
+                self.allowed_domains.update(meta["allowed_domains"])
+
+            # Restore entries
+            for raw_entry in entries:
+                if isinstance(raw_entry, dict):
+                    entry = FrontierEntry.from_dict(raw_entry)
+                elif isinstance(raw_entry, FrontierEntry):
+                    entry = FrontierEntry(
+                        url=raw_entry.url,
+                        depth=raw_entry.depth,
+                        parent_url=raw_entry.parent_url,
+                        state=raw_entry.state,
+                        discovered_at=raw_entry.discovered_at,
+                        retry_count=raw_entry.retry_count,
+                        max_retries=raw_entry.max_retries,
+                        next_eligible_time=raw_entry.next_eligible_time,
+                        error=raw_entry.error,
+                        skip_reason=raw_entry.skip_reason,
+                        duplicate_of=raw_entry.duplicate_of,
+                        status_code=raw_entry.status_code,
+                    )
+                else:
+                    raise CorruptStateError(f"Unexpected entry type: {type(raw_entry)}")
+
+                # CRASH SAFETY: Recover in-flight FETCHING state to QUEUED
+                if entry.state == FrontierState.FETCHING:
+                    entry.state = FrontierState.QUEUED
+
+                self._entries[entry.url] = entry
+
+            # Recalculate admitted_count if missing
+            if "admitted_count" not in meta:
+                self._admitted_count = sum(
+                    1 for e in self._entries.values()
+                    if e.state in {
+                        FrontierState.QUEUED,
+                        FrontierState.FETCHING,
+                        FrontierState.COMPLETED,
+                        FrontierState.FAILED_RETRYABLE,
+                        FrontierState.FAILED_FINAL,
+                    }
+                )
+
+            # If max_urls was increased for a resumed crawl, un-skip entries that were capped by page_limit_reached
+            if self._admitted_count < self.max_urls:
+                for entry in self._entries.values():
+                    if self._admitted_count >= self.max_urls:
+                        break
+                    if (
+                        entry.state == FrontierState.SKIPPED
+                        and entry.skip_reason == "page_limit_reached"
+                        and entry.depth <= self.max_depth
+                    ):
+                        entry.state = FrontierState.QUEUED
+                        entry.skip_reason = ""
+                        self._admitted_count += 1
+
+            # Reconstruct queue preserving checkpoint order if available
+            queued_set = {url for url, e in self._entries.items() if e.state == FrontierState.QUEUED}
+            checkpoint_queue = meta.get("queue", [])
+            ordered_queue: list[str] = []
+            for u in checkpoint_queue:
+                if u in queued_set and u not in ordered_queue:
+                    ordered_queue.append(u)
+            # Append any remaining queued URLs (including recovered FETCHING items and un-skipped items)
+            for u in sorted(queued_set):
+                if u not in ordered_queue:
+                    ordered_queue.append(u)
+
+            self._queue = deque(ordered_queue)
+
+            # Reconstruct retry pool
+            for entry in self._entries.values():
+                if entry.state == FrontierState.FAILED_RETRYABLE:
+                    self._retry_pool[entry.url] = entry

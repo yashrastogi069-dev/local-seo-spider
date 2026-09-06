@@ -1,6 +1,6 @@
 # SESSION HANDOFF: ENGINEERING CONTINUITY RECORD
 
-*Date*: 2026-09-06T06:15:00+05:30  
+*Date*: 2026-09-06T10:15:00+05:30  
 *Handoff Author*: Principal Engineer & Independent QA Auditor  
 *Audience*: Incoming Senior / Staff Engineer continuing development on Local SEO Spider & Semantic RAG  
 
@@ -11,62 +11,75 @@ This repository houses `local-seo-spider`, an enterprise semantic crawler and RA
 
 - Phase 0 (Baseline & Forensic Audit): COMPLETED & CERTIFIED.
 - Phase 1 (Evaluation Integrity): COMPLETED & CERTIFIED (Baseline permanently frozen at `db7fc50`).
-- Phase 2 (Crawler Core): ACTIVE / SUBPHASES 2A-2F FULLY CERTIFIED.
+- Phase 2 (Crawler Core): ACTIVE / SUBPHASES 2A-2G FULLY CERTIFIED.
   - Subphase 2A (Crawler Contracts + State Model): COMPLETED & CERTIFIED (`phase-2a-crawler-contracts`).
   - Subphase 2B (URL Normalization + Frontier + Crawl Lifecycle): COMPLETED & CERTIFIED (`phase-2b-frontier`).
   - Subphase 2C (Four Independent Concurrency Engines): COMPLETED & CERTIFIED (`phase-2c-engine-independence`).
   - Subphase 2D (Concurrency Stress, Failure Injection & Resource Safety): COMPLETED & CERTIFIED (`phase-2d-concurrency-hardening`).
   - Subphase 2E (Static Fetch + Playwright + Smart Escalation): COMPLETED & CERTIFIED (`phase-2e-fetch-strategy`).
   - Subphase 2F (Robots, Politeness, Retries & Crawl Budgets): COMPLETED & CERTIFIED (`phase-2f-budgets-politeness`).
-- Subphase 2G (Authentication, Sessions & State Handling): READY TO BEGIN.
+  - Subphase 2G (Resume, Recovery, Crash Safety & Embedding Auto-Fallback): COMPLETED & CERTIFIED (`phase-2g-resume-recovery`).
+- Subphase 2H (SSRF Defense, Security & Allowed Hosts Enforcement): READY TO BEGIN.
 
-All 343 automated tests pass (341 passed, 2 skipped solely due to optional `sentence-transformers` package). Zero failures, zero regressions across all 42 test modules.
+All 367 automated tests pass (365 passed, 2 skipped solely due to optional `sentence-transformers` package). Zero failures, zero regressions across all 43 test modules.
 
 ---
 
 ## 2. Active Phase Status
-- **Active Phase**: PHASE 2 (Crawler Core) — **SUBPHASE 2F COMPLETED & CERTIFIED**.
-- **Completed Subphase**: Subphase 2F (Robots, Politeness, Retries & Crawl Budgets).
-  - All 33 targeted tests pass across `tests/test_robots_and_politeness.py`, `tests/test_crawl_budgets.py`, and `tests/test_infinite_site_defense.py`.
-  - RFC 9309 compliance verified: 5xx and 429 fail-closed / disallow-all, 4xx allow-all, network errors allow-all (permitting target socket error capture), `Crawl-delay` parsed with user-agent specificity and enforced across all 4 engines.
-  - Politeness & rate limiting: `DomainPolitenessThrottler` and `AsyncDomainPolitenessThrottler` provide strict multi-host isolation (domain A delays never stall domain B), per-host concurrency bounding (`per_host_concurrency=1`), and request completion tracking.
-  - Bounded retries: strict retryable vs non-retryable classification, `max_retries` bounded, `Retry-After` (integer seconds and HTTP-date) parsed and bounded, uniform random jitter (0.8-1.2) preventing retry storms.
-  - Multi-engine crawl budgets: `max_pages`, `max_depth`, `max_bytes`, `max_duration_seconds`, `redirect_limit` enforced across all 4 engines with deterministic transition to `CrawlStatus.BUDGET_EXHAUSTED` and observable `termination_reason`.
-  - Infinite site defenses: session stripping (`;jsessionid=`, `/(S(...))/`, `;sid=`, `;phpsessid=`), path loop cycle detection (`detect_path_loop`), soft-404 cryptographic text deduplication, and pagination bounding.
-- **Next Phase In Line**: Subphase 2G (Authentication, Sessions & State Handling).
+- **Active Phase**: PHASE 2 (Crawler Core) — **SUBPHASE 2G COMPLETED & CERTIFIED**.
+- **Completed Subphase**: Subphase 2G (Resume, Recovery, Crash Safety & Embedding Auto-Fallback).
+  - All 14 targeted tests pass in `tests/test_crawl_resume_and_recovery.py`.
+  - Frontier state persistence across all 8 lifecycle states (`discovered`, `queued`, `fetching`, `completed`, `failed_retryable`, `failed_final`, `skipped`, `duplicate`).
+  - Crash recovery of in-flight `FETCHING` entries safely transitions them back to `QUEUED` with `_active_workers` reset to 0, preventing deadlock or premature termination.
+  - Atomic checkpoints written in `BEGIN IMMEDIATE` transactions under SQLite WAL mode with zero data corruption on interruption.
+  - Multi-engine resume: Serial, Threaded, Coroutine, and Multiprocess engines cleanly resume from checkpoints.
+  - Idempotent database persistence: zero duplicate rows in `pages` or `links` on crawl replay or resume via SQLite `ON CONFLICT DO UPDATE`.
+  - Schema & engine version integrity: `CURRENT_SCHEMA_VERSION = 1` and `CURRENT_ENGINE_VERSION = "2.0.0"` with strict fail-closed `IncompatibleStateError`.
+  - Fail-closed corrupt checkpoint error handling: invalid state JSON or enums raise `CorruptStateError`.
+  - Preserved retry counts and exponential backoff windows across resume lifecycles.
+  - Mathematical accounting reconciliation verification (`reconcile_accounting`).
+  - Budget expansion un-skipping (`restore_state` automatically un-skips `page_limit_reached` URLs when resumed with expanded budget).
+  - In-memory uniqueness deduplication of pages and links in `CrawlEngine._build_crawl_result`.
+  - Monotonic clock continuity across OS reboots via `remaining_delay` serialization in `FrontierEntry`.
+  - Embedding Provider Fix: undefined `logger` symbol resolved; auto-fallback to `"hash"` provider when `sentence-transformers` is unavailable, preventing unhandled exceptions.
+- **Next Phase In Line**: Subphase 2H (SSRF Defense, Security & Allowed Hosts Enforcement).
 
 ---
 
-## 3. Work Completed in Subphase 2F
-1. **Types & Budgets (`app/types.py`)**:
-   - Added `CrawlBudget` dataclass with `max_pages`, `max_depth`, `max_bytes`, `max_duration_seconds`, `max_retries`, `redirect_limit`.
-   - Updated `CrawlRequest` with `budget`, `respect_robots_txt`, and `per_host_concurrency`.
-   - Added `total_response_bytes` and accurate `retry_count` to `CrawlResult`.
-2. **Infinite Site Defense (`app/urltools.py`, `app/frontier.py`)**:
-   - Implemented `detect_path_loop(url_or_path, max_repeats=3)`.
-   - Stripped session IDs in `normalize_url`.
-   - Handled cyclic skips in frontier with `skip_reason="path_loop_detected"`.
-3. **Robots & Politeness Hardening (`app/crawler.py`)**:
-   - RFC 9309 fail-closed logic on 5xx/429, allow-all on 4xx and network errors.
-   - Enhanced `DomainPolitenessThrottler` and `AsyncDomainPolitenessThrottler` with dual host/netloc keying and completion time tracking (`record_completion`).
-   - Integrated throttler and `Crawl-delay` enforcement into `_run_serial`.
-4. **Multiprocess Worker Hardening (`app/multiprocess_worker.py`)**:
-   - Jittered retry delays (`random.uniform(0.8, 1.2)`) and `Retry-After` parsing.
-5. **Fresh-Eyes Subagent Review Remediation**:
-   - Remediated all findings (P1-01, P2-01, P2-02, P2-03, P2-04) from independent auditor review.
+## 3. Work Completed in Subphase 2G
+1. **Types & Exceptions (`app/types.py`)**:
+   - Added `ResumableCrawlError`, `IncompatibleStateError`, `CorruptStateError`.
+   - Added `to_dict()`, `from_dict()`, and `remaining_delay` to `FrontierEntry`.
+   - Added `resumed` boolean flag to `CrawlResult` and `CrawlRequest`.
+2. **Frontier Persistence & Recovery (`app/frontier.py`)**:
+   - Implemented `export_state()`, `restore_state()`, and `get_entries()`.
+   - In-flight crash safety: `FETCHING` -> `QUEUED`, `_active_workers = 0`.
+   - Automatic budget expansion un-skipping.
+   - Preserved retry pool and backoff timestamps.
+3. **Database Checkpointing & Idempotency (`app/database.py`)**:
+   - Created `crawl_frontier_checkpoints` table with index on `(crawl_id, state)`.
+   - Added `checkpoint_json`, `schema_version`, and `engine_version` columns to `crawls`.
+   - Implemented `save_frontier_checkpoint`, `get_frontier_checkpoint`, `validate_checkpoint_compatibility`, `save_page` with `ON CONFLICT DO UPDATE`, `get_crawled_pages`, and `get_crawled_links`.
+4. **Crawler Resumption Across All 4 Engines (`app/crawler.py`)**:
+   - Implemented `_prepare_resumed_state()`, `_checkpoint_state()`, and `_record_skipped_page()`.
+   - Integrated incremental page saving and checkpointing in `_run_serial`, `_run_threaded`, `_run_coroutine`, and `_run_multiprocess`.
+   - Deduplicated in-memory pages and links in `_build_crawl_result`.
+5. **Embedding Provider Auto-Fallback & Logger Fix (`app/main.py`, `app/config.py`)**:
+   - Imported module-level `logger` in `app/main.py`, resolving `NameError` on catch block.
+   - Added `try...except ImportError` check in `Settings.from_environment()` to default and fall back to `"hash"`.
 6. **Persistent Memory Synchronized**:
-   - Added ADR-014 to `DECISIONS.md`.
-   - Updated `TEST_MATRIX.md`, `RELEASE_GATES.md`, `ops/STATE.md`, and `CHANGELOG.md`.
+   - Added ADR-015 to `DECISIONS.md`.
+   - Updated `TEST_MATRIX.md`, `RELEASE_GATES.md`, `ops/STATE.md`, `CHANGELOG.md`, and `ops/CHANGELOG.md`.
 
 ---
 
 ## 4. Test & Verification State
-- **Command**: `pytest`
-- **Total Tests**: 343
-- **Passed**: 341
+- **Command**: `pytest tests/ -q`
+- **Total Tests**: 367
+- **Passed**: 365
 - **Failed**: 0
 - **Skipped**: 2 (gracefully skipped: `sentence-transformers` optional package)
-- **Duration**: ~280s full suite, ~36s Phase 2F suite.
+- **Duration**: ~290s full suite, ~36s Phase 2G suite.
 
 ---
 

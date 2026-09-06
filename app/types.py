@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 import threading
+import time
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -116,6 +117,18 @@ class InvalidStateTransitionError(ValueError):
     """Raised when an invalid frontier state transition is attempted."""
 
 
+class ResumableCrawlError(Exception):
+    """Base exception for crawl resume and checkpoint failures."""
+
+
+class IncompatibleStateError(ResumableCrawlError):
+    """Raised when persisted crawl state is incompatible with current schema or configuration."""
+
+
+class CorruptStateError(ResumableCrawlError):
+    """Raised when persisted crawl state is corrupted, malformed, or missing critical data."""
+
+
 VALID_FRONTIER_TRANSITIONS: dict[FrontierState, set[FrontierState]] = {
     FrontierState.DISCOVERED: {
         FrontierState.QUEUED,
@@ -183,6 +196,52 @@ class FrontierEntry:
             parent_url=self.parent_url,
             discovered_at=self.discovered_at,
             retry_count=self.retry_count,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        now_mono = time.monotonic()
+        remaining_delay = max(0.0, self.next_eligible_time - now_mono) if self.next_eligible_time > 0 else 0.0
+        return {
+            "url": self.url,
+            "depth": self.depth,
+            "parent_url": self.parent_url,
+            "state": self.state.value if isinstance(self.state, FrontierState) else str(self.state),
+            "discovered_at": self.discovered_at,
+            "retry_count": self.retry_count,
+            "max_retries": self.max_retries,
+            "next_eligible_time": self.next_eligible_time,
+            "remaining_delay": remaining_delay,
+            "error": self.error,
+            "skip_reason": self.skip_reason,
+            "duplicate_of": self.duplicate_of,
+            "status_code": self.status_code,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> FrontierEntry:
+        state_raw = data.get("state", "discovered")
+        try:
+            state = FrontierState(state_raw)
+        except ValueError:
+            raise CorruptStateError(f"Invalid frontier state in persisted record: {state_raw}")
+        remaining_delay = float(data.get("remaining_delay", 0.0))
+        if remaining_delay > 0:
+            next_eligible_time = time.monotonic() + remaining_delay
+        else:
+            next_eligible_time = float(data.get("next_eligible_time", 0.0))
+        return cls(
+            url=data["url"],
+            depth=int(data.get("depth", 0)),
+            parent_url=data.get("parent_url", ""),
+            state=state,
+            discovered_at=data.get("discovered_at", ""),
+            retry_count=int(data.get("retry_count", 0)),
+            max_retries=int(data.get("max_retries", 3)),
+            next_eligible_time=next_eligible_time,
+            error=data.get("error", ""),
+            skip_reason=data.get("skip_reason", ""),
+            duplicate_of=data.get("duplicate_of", ""),
+            status_code=data.get("status_code"),
         )
 
 
@@ -310,6 +369,7 @@ class CrawlResult:
     links: list[LinkRecord] = field(default_factory=list)
     robots_status: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    resumed: bool = False
 
     def __post_init__(self) -> None:
         if not self.fallback_occurred:
@@ -355,6 +415,7 @@ class CrawlResult:
             "links": [link.to_dict() for link in self.links],
             "robots_status": self.robots_status,
             "metadata": dict(self.metadata),
+            "resumed": self.resumed,
         }
 
 
@@ -390,6 +451,7 @@ class CrawlRequest:
     budget: CrawlBudget | None = None
     respect_robots_txt: bool = True
     per_host_concurrency: int | None = None
+    resume: bool = False
 
     def public_settings(self) -> dict[str, Any]:
         return {
@@ -407,6 +469,7 @@ class CrawlRequest:
             "budget": self.budget.to_dict() if self.budget else None,
             "respect_robots_txt": self.respect_robots_txt,
             "per_host_concurrency": self.per_host_concurrency,
+            "resume": self.resume,
         }
 
     def storage_payload(self) -> dict[str, Any]:
@@ -434,6 +497,7 @@ class CrawlRequest:
             budget=budget,
             respect_robots_txt=bool(payload.get("respect_robots_txt", True)),
             per_host_concurrency=payload.get("per_host_concurrency"),
+            resume=bool(payload.get("resume", False)),
         )
 
 

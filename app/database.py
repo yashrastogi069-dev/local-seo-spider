@@ -13,7 +13,19 @@ from uuid import uuid4
 
 from app.embeddings import EmbeddingProvider, HashEmbeddingProvider, cosine_similarity
 from app.knowledge import KnowledgeChunk
-from app.types import CrawlRequest, IssueRecord, LinkRecord, PageRecord
+from app.types import (
+    CorruptStateError,
+    CrawlRequest,
+    FrontierEntry,
+    IncompatibleStateError,
+    IssueRecord,
+    LinkRecord,
+    PageRecord,
+    ResumableCrawlError,
+)
+
+CURRENT_SCHEMA_VERSION: int = 1
+CURRENT_ENGINE_VERSION: str = "2.0.0"
 
 
 def now() -> str:
@@ -138,8 +150,29 @@ class Database:
                   input_json TEXT NOT NULL, result_json TEXT NOT NULL DEFAULT '{}', error_message TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow ON workflow_runs(workflow_id, created_at);
+                CREATE TABLE IF NOT EXISTS crawl_frontier_checkpoints (
+                  crawl_id TEXT NOT NULL REFERENCES crawls(id) ON DELETE CASCADE,
+                  url TEXT NOT NULL, depth INTEGER NOT NULL DEFAULT 0,
+                  parent_url TEXT NOT NULL DEFAULT '', state TEXT NOT NULL,
+                  discovered_at TEXT NOT NULL DEFAULT '', retry_count INTEGER NOT NULL DEFAULT 0,
+                  max_retries INTEGER NOT NULL DEFAULT 3, next_eligible_time REAL NOT NULL DEFAULT 0.0,
+                  error TEXT NOT NULL DEFAULT '', skip_reason TEXT NOT NULL DEFAULT '',
+                  duplicate_of TEXT NOT NULL DEFAULT '', status_code INTEGER,
+                  PRIMARY KEY (crawl_id, url)
+                );
+                CREATE INDEX IF NOT EXISTS idx_frontier_crawl_state ON crawl_frontier_checkpoints(crawl_id, state);
                 """
             )
+            try:
+                conn.execute(
+                    "DELETE FROM links WHERE id NOT IN (SELECT MIN(id) FROM links GROUP BY crawl_id, source_url, target_url)"
+                )
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_links_crawl_source_target ON links(crawl_id, source_url, target_url)"
+                )
+            except Exception:
+                pass
+
             self._ensure_crawl_columns(conn)
             self._ensure_page_columns(conn)
             self._ensure_knowledge_columns(conn)
@@ -207,18 +240,24 @@ class Database:
             "next_run_at": "TEXT",
             "last_attempt_at": "TEXT",
             "pause_reason": "TEXT NOT NULL DEFAULT ''",
+            "checkpoint_json": "TEXT NOT NULL DEFAULT '{}'",
+            "schema_version": "INTEGER NOT NULL DEFAULT 1",
+            "engine_version": "TEXT NOT NULL DEFAULT '2.0.0'",
         }
         for name, definition in required.items():
             if name not in existing:
                 conn.execute(f"ALTER TABLE crawls ADD COLUMN {name} {definition}")
 
     def create_crawl(self, request: CrawlRequest) -> str:
-        crawl_id = str(uuid4())
+        crawl_id = request.crawl_id or str(uuid4())
         with self.connect() as conn:
             conn.execute(
-                """INSERT INTO crawls (id, created_at, status, start_url, settings_json, request_json, ownership_ack, next_run_at)
-                   VALUES (?, ?, 'queued', ?, ?, ?, ?, ?)""",
-                (crawl_id, now(), request.start_url, json.dumps(request.public_settings()), json.dumps(request.storage_payload()), int(request.acknowledgment), now()),
+                """INSERT INTO crawls (id, created_at, status, start_url, settings_json, request_json, ownership_ack, next_run_at, schema_version, engine_version)
+                   VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                   settings_json=excluded.settings_json, request_json=excluded.request_json,
+                   schema_version=excluded.schema_version, engine_version=excluded.engine_version""",
+                (crawl_id, now(), request.start_url, json.dumps(request.public_settings()), json.dumps(request.storage_payload()), int(request.acknowledgment), now(), CURRENT_SCHEMA_VERSION, CURRENT_ENGINE_VERSION),
             )
         return crawl_id
 
@@ -423,7 +462,10 @@ class Database:
             )
             conn.executemany(
                 """INSERT INTO links (crawl_id, source_url, target_url, raw_target_url, anchor_text, rel, is_internal, nofollow)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(crawl_id, source_url, target_url) DO UPDATE SET
+                   raw_target_url=excluded.raw_target_url, anchor_text=excluded.anchor_text,
+                   rel=excluded.rel, is_internal=excluded.is_internal, nofollow=excluded.nofollow""",
                 [
                     (crawl_id, link.source_url, link.target_url, link.raw_target_url, link.anchor_text, link.rel,
                      int(link.is_internal), int(link.nofollow)) for link in links
@@ -869,4 +911,277 @@ class Database:
         page["is_duplicate"] = bool(page.get("is_duplicate", 0))
         page["escalated"] = bool(page.get("escalated", 0))
         return page
+
+    def save_page(self, crawl_id: str, page: PageRecord, links: list[LinkRecord] | None = None) -> None:
+        """Atomically upsert a single page and its outgoing links incrementally."""
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO pages (crawl_id, url, final_url, status_code, content_type, title, description, headings_json,
+                   canonical, meta_robots, x_robots, source_html, rendered_html, rendered_text, extracted_text, extraction_error, extracted_fields_json, extraction_notes_json, images_json, structured_data_json, api_entry_points_json,
+                   redirects_json, fetch_error, render_error, robots_allowed, body_truncated, discovered_at, internal_inlinks, content_hash,
+                   etag, last_modified, is_duplicate, duplicate_of, source_type, depth, parent_url,
+                   normalized_url, fetch_strategy, crawler_engine, response_bytes, duration_ms, error_category, headers_json,
+                   requested_fetch_strategy, actual_fetch_strategy, escalated, escalation_reason, fetch_duration_ms, render_duration_ms)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(crawl_id, url) DO UPDATE SET
+                   final_url=excluded.final_url, status_code=excluded.status_code, content_type=excluded.content_type,
+                   title=excluded.title, description=excluded.description, headings_json=excluded.headings_json,
+                   canonical=excluded.canonical, meta_robots=excluded.meta_robots, x_robots=excluded.x_robots,
+                   source_html=excluded.source_html, rendered_html=excluded.rendered_html, rendered_text=excluded.rendered_text,
+                   extracted_text=excluded.extracted_text, extraction_error=excluded.extraction_error,
+                   extracted_fields_json=excluded.extracted_fields_json, extraction_notes_json=excluded.extraction_notes_json,
+                   images_json=excluded.images_json, structured_data_json=excluded.structured_data_json,
+                   api_entry_points_json=excluded.api_entry_points_json, redirects_json=excluded.redirects_json,
+                   fetch_error=excluded.fetch_error, render_error=excluded.render_error, robots_allowed=excluded.robots_allowed,
+                   body_truncated=excluded.body_truncated, internal_inlinks=excluded.internal_inlinks,
+                   content_hash=excluded.content_hash, etag=excluded.etag, last_modified=excluded.last_modified,
+                   is_duplicate=excluded.is_duplicate, duplicate_of=excluded.duplicate_of, source_type=excluded.source_type,
+                   depth=excluded.depth, parent_url=excluded.parent_url, normalized_url=excluded.normalized_url,
+                   fetch_strategy=excluded.fetch_strategy, crawler_engine=excluded.crawler_engine,
+                   response_bytes=excluded.response_bytes, duration_ms=excluded.duration_ms,
+                   error_category=excluded.error_category, headers_json=excluded.headers_json,
+                   requested_fetch_strategy=excluded.requested_fetch_strategy,
+                   actual_fetch_strategy=excluded.actual_fetch_strategy, escalated=excluded.escalated,
+                   escalation_reason=excluded.escalation_reason, fetch_duration_ms=excluded.fetch_duration_ms,
+                   render_duration_ms=excluded.render_duration_ms""",
+                (
+                    crawl_id, page.url, page.final_url, page.status_code, page.content_type, page.title, page.description,
+                    json.dumps(page.headings), page.canonical, page.meta_robots, page.x_robots, page.source_html,
+                    page.rendered_html, page.rendered_text, page.extracted_text, page.extraction_error, json.dumps(page.extracted_fields), json.dumps(page.extraction_notes), json.dumps(page.images), json.dumps(page.structured_data), json.dumps(page.api_entry_points),
+                    json.dumps(page.redirect_chain), page.fetch_error, page.render_error, int(page.robots_allowed),
+                    int(page.body_truncated), page.discovered_at, page.internal_inlinks, page.content_hash,
+                    getattr(page, "etag", ""), getattr(page, "last_modified", ""),
+                    int(getattr(page, "is_duplicate", False)), getattr(page, "duplicate_of", ""),
+                    getattr(page, "source_type", "html_page"), getattr(page, "depth", 0), getattr(page, "parent_url", ""),
+                    getattr(page, "normalized_url", page.final_url or page.url),
+                    getattr(page, "fetch_strategy", "static"),
+                    getattr(page, "crawler_engine", "serial"),
+                    getattr(page, "response_bytes", 0),
+                    getattr(page, "duration_ms", 0.0),
+                    getattr(page, "error_category", "none"),
+                    json.dumps(getattr(page, "headers", {})),
+                    getattr(page, "requested_fetch_strategy", getattr(page, "fetch_strategy", "static")),
+                    getattr(page, "actual_fetch_strategy", getattr(page, "fetch_strategy", "static")),
+                    int(getattr(page, "escalated", False)),
+                    getattr(page, "escalation_reason", ""),
+                    getattr(page, "fetch_duration_ms", getattr(page, "duration_ms", 0.0)),
+                    getattr(page, "render_duration_ms", 0.0),
+                ),
+            )
+            if links:
+                conn.executemany(
+                    """INSERT INTO links (crawl_id, source_url, target_url, raw_target_url, anchor_text, rel, is_internal, nofollow)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(crawl_id, source_url, target_url) DO UPDATE SET
+                       raw_target_url=excluded.raw_target_url, anchor_text=excluded.anchor_text,
+                       rel=excluded.rel, is_internal=excluded.is_internal, nofollow=excluded.nofollow""",
+                    [
+                        (crawl_id, link.source_url, link.target_url, link.raw_target_url, link.anchor_text, link.rel,
+                         int(link.is_internal), int(link.nofollow)) for link in links
+                    ],
+                )
+
+    def save_frontier_checkpoint(
+        self,
+        crawl_id: str,
+        frontier: Any,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Atomically persist complete frontier state and metadata in a single transaction."""
+        meta = dict(metadata or {})
+        if hasattr(frontier, "export_state"):
+            exported = frontier.export_state()
+            entries = exported.get("entries", [])
+            combined_meta = {
+                "admitted_count": exported.get("admitted_count", 0),
+                "retry_count": exported.get("retry_count", 0),
+                "seen_canonicals": exported.get("seen_canonicals", {}),
+                "alias_map": exported.get("alias_map", {}),
+                "allowed_domains": exported.get("allowed_domains", []),
+                "queue": exported.get("queue", []),
+                "saved_at": now(),
+            }
+            combined_meta.update(meta)
+        else:
+            entries = [e.to_dict() if hasattr(e, "to_dict") else dict(e) for e in getattr(frontier, "get_entries", lambda: [])()]
+            combined_meta = {"saved_at": now()} | meta
+
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM crawl_frontier_checkpoints WHERE crawl_id = ?", (crawl_id,))
+            conn.executemany(
+                """INSERT INTO crawl_frontier_checkpoints (
+                       crawl_id, url, depth, parent_url, state, discovered_at,
+                       retry_count, max_retries, next_eligible_time, error,
+                       skip_reason, duplicate_of, status_code
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        crawl_id,
+                        e["url"],
+                        e.get("depth", 0),
+                        e.get("parent_url", ""),
+                        e.get("state", "queued"),
+                        e.get("discovered_at", ""),
+                        e.get("retry_count", 0),
+                        e.get("max_retries", 3),
+                        e.get("next_eligible_time", 0.0),
+                        e.get("error", ""),
+                        e.get("skip_reason", ""),
+                        e.get("duplicate_of", ""),
+                        e.get("status_code"),
+                    )
+                    for e in entries
+                ],
+            )
+            conn.execute(
+                "UPDATE crawls SET checkpoint_json = ?, last_attempt_at = ? WHERE id = ?",
+                (json.dumps(combined_meta), now(), crawl_id),
+            )
+
+    def validate_checkpoint_compatibility(self, crawl_id: str) -> tuple[bool, str]:
+        """Validate that a saved crawl checkpoint is compatible with current engine and schema."""
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT schema_version, engine_version, checkpoint_json FROM crawls WHERE id = ?",
+                (crawl_id,),
+            ).fetchone()
+            if not row:
+                raise CorruptStateError(f"Crawl {crawl_id} not found in database.")
+
+            schema_version = int(row["schema_version"] or 1)
+            if schema_version > CURRENT_SCHEMA_VERSION:
+                raise IncompatibleStateError(
+                    f"Checkpoint schema version {schema_version} is incompatible with engine supported version {CURRENT_SCHEMA_VERSION}."
+                )
+
+            engine_ver = str(row["engine_version"] or "1.0.0")
+            try:
+                major_ver = int(engine_ver.split(".")[0])
+                current_major = int(CURRENT_ENGINE_VERSION.split(".")[0])
+                if major_ver > current_major:
+                    raise IncompatibleStateError(
+                        f"Checkpoint engine version {engine_ver} is newer than current engine {CURRENT_ENGINE_VERSION}."
+                    )
+            except ValueError:
+                pass
+
+            checkpoint_raw = row["checkpoint_json"]
+            if checkpoint_raw and checkpoint_raw != "{}":
+                try:
+                    json.loads(checkpoint_raw)
+                except Exception as err:
+                    raise CorruptStateError(f"Corrupt checkpoint JSON in crawl {crawl_id}: {err}") from err
+
+            return True, "compatible"
+
+    def get_frontier_checkpoint(self, crawl_id: str) -> tuple[list[FrontierEntry], dict[str, Any]] | None:
+        """Retrieve persisted frontier entries and checkpoint metadata.
+
+        Raises CorruptStateError if persisted records or JSON are corrupted.
+        Raises IncompatibleStateError if schema/engine version is incompatible.
+        """
+        self.validate_checkpoint_compatibility(crawl_id)
+        with self.connect() as conn:
+            crawl_row = conn.execute("SELECT checkpoint_json FROM crawls WHERE id = ?", (crawl_id,)).fetchone()
+            if not crawl_row or not crawl_row["checkpoint_json"] or crawl_row["checkpoint_json"] == "{}":
+                return None
+            try:
+                meta = json.loads(crawl_row["checkpoint_json"])
+            except Exception as e:
+                raise CorruptStateError(f"Corrupt checkpoint metadata JSON for crawl {crawl_id}: {e}") from e
+
+            rows = conn.execute(
+                """SELECT url, depth, parent_url, state, discovered_at, retry_count,
+                          max_retries, next_eligible_time, error, skip_reason, duplicate_of, status_code
+                   FROM crawl_frontier_checkpoints WHERE crawl_id = ? ORDER BY depth, rowid""",
+                (crawl_id,),
+            ).fetchall()
+
+            entries: list[FrontierEntry] = []
+            for r in rows:
+                try:
+                    entries.append(FrontierEntry.from_dict(dict(r)))
+                except Exception as e:
+                    raise CorruptStateError(f"Corrupt frontier checkpoint entry in crawl {crawl_id}: {e}") from e
+
+            return entries, meta
+
+    def get_crawled_pages(self, crawl_id: str) -> list[PageRecord]:
+        """Reconstruct PageRecord instances from persistent database rows."""
+        raw_pages = self.get_pages(crawl_id)
+        pages: list[PageRecord] = []
+        for p in raw_pages:
+            pages.append(
+                PageRecord(
+                    url=p["url"],
+                    final_url=p["final_url"],
+                    status_code=p["status_code"],
+                    content_type=p["content_type"],
+                    title=p["title"],
+                    description=p["description"],
+                    headings=p.get("headings", []),
+                    canonical=p.get("canonical", ""),
+                    meta_robots=p.get("meta_robots", ""),
+                    x_robots=p.get("x_robots", ""),
+                    source_html=p.get("source_html", ""),
+                    rendered_html=p.get("rendered_html", ""),
+                    rendered_text=p.get("rendered_text", ""),
+                    extracted_text=p.get("extracted_text", ""),
+                    extraction_error=p.get("extraction_error", ""),
+                    extracted_fields=p.get("extracted_fields", {}),
+                    extraction_notes=p.get("extraction_notes", []),
+                    images=p.get("images", []),
+                    structured_data=p.get("structured_data", []),
+                    api_entry_points=p.get("api_entry_points", []),
+                    redirect_chain=p.get("redirects", []),
+                    fetch_error=p.get("fetch_error", ""),
+                    render_error=p.get("render_error", ""),
+                    robots_allowed=bool(p.get("robots_allowed", True)),
+                    body_truncated=bool(p.get("body_truncated", False)),
+                    discovered_at=p.get("discovered_at", ""),
+                    internal_inlinks=int(p.get("internal_inlinks", 0)),
+                    content_hash=p.get("content_hash", ""),
+                    etag=p.get("etag", ""),
+                    last_modified=p.get("last_modified", ""),
+                    is_duplicate=bool(p.get("is_duplicate", False)),
+                    duplicate_of=p.get("duplicate_of", ""),
+                    source_type=p.get("source_type", "html_page"),
+                    depth=int(p.get("depth", 0)),
+                    parent_url=p.get("parent_url", ""),
+                    normalized_url=p.get("normalized_url", ""),
+                    fetch_strategy=p.get("fetch_strategy", "static"),
+                    crawler_engine=p.get("crawler_engine", "serial"),
+                    response_bytes=int(p.get("response_bytes", 0)),
+                    duration_ms=float(p.get("duration_ms", 0.0)),
+                    error_category=p.get("error_category", "none"),
+                    headers=p.get("headers", {}),
+                    requested_fetch_strategy=p.get("requested_fetch_strategy", "static"),
+                    actual_fetch_strategy=p.get("actual_fetch_strategy", "static"),
+                    escalated=bool(p.get("escalated", False)),
+                    escalation_reason=p.get("escalation_reason", ""),
+                    fetch_duration_ms=float(p.get("fetch_duration_ms", 0.0)),
+                    render_duration_ms=float(p.get("render_duration_ms", 0.0)),
+                )
+            )
+        return pages
+
+    def get_crawled_links(self, crawl_id: str) -> list[LinkRecord]:
+        """Reconstruct LinkRecord instances from persistent database rows."""
+        raw_links = self.get_links(crawl_id)
+        links: list[LinkRecord] = []
+        for l in raw_links:
+            links.append(
+                LinkRecord(
+                    source_url=l["source_url"],
+                    target_url=l["target_url"],
+                    raw_target_url=l["raw_target_url"],
+                    anchor_text=l["anchor_text"],
+                    rel=l["rel"],
+                    is_internal=bool(l["is_internal"]),
+                    nofollow=bool(l["nofollow"]),
+                )
+            )
+        return links
+
 

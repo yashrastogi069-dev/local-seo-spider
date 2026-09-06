@@ -111,7 +111,19 @@ This document defines the strict, non-negotiable release gates for every phase o
 - [x] Full regression suite passes: 341 passed, 2 skipped, 0 failed across all 343 tests.
 - **SUBPHASE 2F GATE STATUS**: **PASSED**
 
-- **GATE STATUS**: **PASSED (Phase 2F Certified)**
+#### Subphase 2G: Resume, Recovery, Crash Safety & Idempotency
+- [x] State persistence: complete frontier state across all 8 states (`discovered`, `queued`, `fetching`, `completed`, `failed_retryable`, `failed_final`, `skipped`, `duplicate`) durably stored in SQLite `crawl_frontier_checkpoints` with index on `(crawl_id, state)`.
+- [x] In-flight crash safety: `restore_state` recovers in-flight `FETCHING` entries to `QUEUED`, resets `_active_workers` to 0, prevents queue starvation, and reconstructs queue order.
+- [x] Interruption scenarios: crawl interruption verified after discovery, during fetch, during DB write rollback, during retries, and while multi-workers are active.
+- [x] Idempotent persistence: SQLite `UNIQUE(crawl_id, url)` on `pages` and `UNIQUE(crawl_id, source_url, target_url)` on `links` with `ON CONFLICT DO UPDATE` guarantees zero duplicate rows on crawl replay/resume.
+- [x] Version compatibility: explicit schema (`CURRENT_SCHEMA_VERSION = 1`) and major engine (`CURRENT_ENGINE_VERSION = "2.0.0"`) validation; fail-closed `IncompatibleStateError`.
+- [x] Corrupt state defense: malformed JSON or corrupted entries raise `CorruptStateError` without silent data corruption.
+- [x] Mathematical reconciliation: `reconcile_accounting()` verified to balance across multiple resume cycles (`discovered == completed + queued + fetching + failed_retryable + failed_final + skipped + duplicate`).
+- [x] Multi-engine parity: all 4 engines (`serial`, `thread`, `async`, `process`) verified to resume cleanly.
+- [x] Dedicated test suite: 14 tests in `tests/test_crawl_resume_and_recovery.py` pass 100%.
+- **SUBPHASE 2G GATE STATUS**: **PASSED**
+
+- **GATE STATUS**: **PASSED (Phase 2G Certified)**
 
 ### PHASE 3: Universal Extraction
 - [x] Preservation of JSON deep semantics, scalar types, and nested object relationships.

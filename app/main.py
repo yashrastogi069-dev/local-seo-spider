@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
+
+logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response

@@ -33,6 +33,7 @@ from app.normalization import normalize_page_payload
 from app.parser import extract_api_entry_points, extract_links, extract_page_signals, normalized_text, text_hash
 from app.types import (
     CancellationToken,
+    CorruptStateError,
     CrawlerEngineProtocol,
     CrawlBudget,
     CrawlRequest,
@@ -40,8 +41,10 @@ from app.types import (
     CrawlStatus,
     EngineMode,
     FetchMode,
+    IncompatibleStateError,
     LinkRecord,
     PageRecord,
+    ResumableCrawlError,
 )
 from app.urltools import (
     UrlNormalizationPolicy,
@@ -215,11 +218,90 @@ class AsyncDomainPolitenessThrottler:
 class BaseCrawlerEngine:
     """Base crawler engine providing shared signal extraction, robots, and result assembly."""
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, database: Any = None):
         self.settings = settings
+        self.database = database
         self.extraction_profile = load_profile(settings.extraction_profile_path)
         self._robots_cache: dict[str, tuple[robotparser.RobotFileParser, str]] = {}
         self._async_robots_cache: dict[str, tuple[robotparser.RobotFileParser, str]] = {}
+
+    def _prepare_resumed_state(
+        self,
+        request: CrawlRequest,
+        frontier: CrawlFrontier,
+    ) -> tuple[bool, list[PageRecord], list[LinkRecord], int, int, dict[str, str], dict[str, str], dict[str, int]]:
+        """If request.resume is True and database is present, restore persisted state from checkpoint.
+
+        Returns (resumed, pages, links, total_response_bytes, retries_performed, seen_content_hashes, seen_canonicals, pagination_counts).
+        """
+        if not getattr(request, "resume", False):
+            return False, [], [], 0, 0, {}, {}, {}
+
+        if not self.database or not getattr(request, "crawl_id", ""):
+            raise ResumableCrawlError("Cannot resume crawl without database and crawl_id.")
+
+        self.database.validate_checkpoint_compatibility(request.crawl_id)
+        checkpoint = self.database.get_frontier_checkpoint(request.crawl_id)
+        if not checkpoint:
+            raise ResumableCrawlError(f"No checkpoint found for crawl {request.crawl_id}.")
+
+        entries, meta = checkpoint
+        frontier.restore_state(entries, metadata=meta)
+        pages = self.database.get_crawled_pages(request.crawl_id)
+        links = self.database.get_crawled_links(request.crawl_id)
+        total_response_bytes = int(meta.get("total_response_bytes", sum(p.response_bytes for p in pages)))
+        retries_performed = int(meta.get("retries_performed", frontier.retry_count))
+        seen_content_hashes = {p.content_hash: p.url for p in pages if p.content_hash}
+        seen_canonicals = dict(meta.get("seen_canonicals", {}))
+        pagination_counts = dict(meta.get("pagination_counts", {}))
+
+        return True, pages, links, total_response_bytes, retries_performed, seen_content_hashes, seen_canonicals, pagination_counts
+
+    def _checkpoint_state(
+        self,
+        request: CrawlRequest,
+        frontier: CrawlFrontier,
+        total_response_bytes: int = 0,
+        retries_performed: int = 0,
+        seen_content_hashes: dict[str, str] | None = None,
+        seen_canonicals: dict[str, str] | None = None,
+        pagination_counts: dict[str, int] | None = None,
+    ) -> None:
+        if self.database and getattr(request, "crawl_id", ""):
+            self.database.save_frontier_checkpoint(
+                request.crawl_id,
+                frontier,
+                metadata={
+                    "total_response_bytes": total_response_bytes,
+                    "retries_performed": retries_performed,
+                    "seen_canonicals": seen_canonicals or {},
+                    "seen_content_hashes": list((seen_content_hashes or {}).keys()),
+                    "pagination_counts": pagination_counts or {},
+                },
+            )
+
+    def _record_skipped_page(
+        self,
+        request: CrawlRequest,
+        frontier: CrawlFrontier,
+        page: PageRecord,
+        pages: list[PageRecord],
+        seen_canonicals: dict[str, str] | None = None,
+        seen_content_hashes: dict[str, str] | None = None,
+        pagination_counts: dict[str, int] | None = None,
+    ) -> None:
+        pages.append(page)
+        if self.database and getattr(request, "crawl_id", ""):
+            self.database.save_page(request.crawl_id, page, [])
+            self._checkpoint_state(
+                request,
+                frontier,
+                total_response_bytes=sum(p.response_bytes for p in pages),
+                retries_performed=frontier.retry_count,
+                seen_content_hashes=seen_content_hashes or {},
+                seen_canonicals=seen_canonicals or {},
+                pagination_counts=pagination_counts or {},
+            )
 
     @staticmethod
     def _now() -> str:
@@ -865,6 +947,17 @@ class BaseCrawlerEngine:
         pages.append(page)
         links.extend(page_links)
         self._enqueue_discovered(request, page, page_links, frontier, pagination_counts)
+        if self.database and getattr(request, "crawl_id", ""):
+            self.database.save_page(request.crawl_id, page, page_links)
+            self._checkpoint_state(
+                request,
+                frontier,
+                total_response_bytes=sum(p.response_bytes for p in pages),
+                retries_performed=frontier.retry_count,
+                seen_content_hashes=seen_content_hashes,
+                seen_canonicals=seen_canonicals,
+                pagination_counts=pagination_counts,
+            )
 
     def _build_crawl_result(
         self,
@@ -882,9 +975,27 @@ class BaseCrawlerEngine:
         termination_budget_reason: str = "",
         total_response_bytes: int = 0,
         retries_performed: int = 0,
+        resumed: bool = False,
     ) -> CrawlResult:
+        # Ensure strict in-memory deduplication across crash recovery and resume
+        seen_urls: set[str] = set()
+        unique_pages: list[PageRecord] = []
+        for p in pages:
+            if p.url not in seen_urls:
+                seen_urls.add(p.url)
+                unique_pages.append(p)
+
+        seen_link_keys: set[tuple[str, str]] = set()
+        unique_links: list[LinkRecord] = []
+        for l in links:
+            key = (l.source_url, l.target_url)
+            if key not in seen_link_keys:
+                seen_link_keys.add(key)
+                unique_links.append(l)
+        links = unique_links
+
         effective_limit = request.budget.max_pages if (request.budget and request.budget.max_pages is not None) else request.max_urls
-        pages_to_return = pages[: effective_limit]
+        pages_to_return = unique_pages[: effective_limit]
         finished_at = self._now()
         duration_ms = (time.monotonic() - start_time) * 1000.0
         pages_succeeded = sum(1 for p in pages_to_return if p.status_code and p.status_code < 400 and p.robots_allowed and not p.fetch_error)
@@ -961,6 +1072,7 @@ class BaseCrawlerEngine:
             links=links,
             robots_status=robots_status,
             pages_escalated=pages_escalated,
+            resumed=resumed or getattr(request, "resume", False),
         )
 
 
@@ -1038,6 +1150,29 @@ class CrawlEngine(BaseCrawlerEngine):
         seen_content_hashes: dict[str, str] = {}
         seen_canonicals: dict[str, str] = {}
         pagination_counts: dict[str, int] = {}
+
+        resumed, resumed_pages, resumed_links, resumed_bytes, resumed_retries, resumed_hashes, resumed_canonicals, resumed_paginations = (
+            self._prepare_resumed_state(request, frontier)
+        )
+        pages.extend(resumed_pages)
+        links.extend(resumed_links)
+        total_response_bytes += resumed_bytes
+        retries_performed += resumed_retries
+        seen_content_hashes.update(resumed_hashes)
+        seen_canonicals.update(resumed_canonicals)
+        pagination_counts.update(resumed_paginations)
+
+        if not resumed and self.database and getattr(request, "crawl_id", ""):
+            self._checkpoint_state(
+                request,
+                frontier,
+                total_response_bytes=total_response_bytes,
+                retries_performed=retries_performed,
+                seen_content_hashes=seen_content_hashes,
+                seen_canonicals=seen_canonicals,
+                pagination_counts=pagination_counts,
+            )
+
         throttler = DomainPolitenessThrottler(request.delay_seconds, per_host_concurrency=1)
 
         headers = {
@@ -1096,12 +1231,16 @@ class CrawlEngine(BaseCrawlerEngine):
                         robots, robots_status = self._safe_robots(client, url, respect_robots=True, throttler=throttler)
                         if not robots.can_fetch(self.settings.user_agent, url):
                             frontier.mark_skipped(url, reason="robots_disallowed")
-                            pages.append(self._error_page(
+                            err_page = self._error_page(
                                 url, [], "robots_disallowed", "serial",
                                 depth=depth, parent_url=parent_url,
                                 requested_fetch_strategy=requested_fetch_mode,
                                 actual_fetch_strategy="static",
-                            ))
+                            )
+                            self._record_skipped_page(
+                                request, frontier, err_page, pages,
+                                seen_canonicals, seen_content_hashes, pagination_counts,
+                            )
                             progress(len(pages), frontier.queue_size, robots_status)
                             continue
 
@@ -1218,6 +1357,7 @@ class CrawlEngine(BaseCrawlerEngine):
             termination_budget_reason=termination_budget_reason,
             total_response_bytes=total_response_bytes,
             retries_performed=retries_performed,
+            resumed=resumed,
         )
 
     def _run_threaded(
@@ -1258,6 +1398,29 @@ class CrawlEngine(BaseCrawlerEngine):
         seen_content_hashes: dict[str, str] = {}
         seen_canonicals: dict[str, str] = {}
         pagination_counts: dict[str, int] = {}
+
+        resumed, resumed_pages, resumed_links, resumed_bytes, resumed_retries, resumed_hashes, resumed_canonicals, resumed_paginations = (
+            self._prepare_resumed_state(request, frontier)
+        )
+        pages.extend(resumed_pages)
+        links.extend(resumed_links)
+        total_response_bytes += resumed_bytes
+        retries_performed += resumed_retries
+        seen_content_hashes.update(resumed_hashes)
+        seen_canonicals.update(resumed_canonicals)
+        pagination_counts.update(resumed_paginations)
+
+        if not resumed and self.database and getattr(request, "crawl_id", ""):
+            self._checkpoint_state(
+                request,
+                frontier,
+                total_response_bytes=total_response_bytes,
+                retries_performed=retries_performed,
+                seen_content_hashes=seen_content_hashes,
+                seen_canonicals=seen_canonicals,
+                pagination_counts=pagination_counts,
+            )
+
         per_host_limit = request.per_host_concurrency if request.per_host_concurrency is not None else workers
         throttler = DomainPolitenessThrottler(request.delay_seconds, per_host_concurrency=per_host_limit)
 
@@ -1323,12 +1486,16 @@ class CrawlEngine(BaseCrawlerEngine):
                             robots, robots_status = self._safe_robots(client, entry.url, respect_robots=True, throttler=throttler)
                             if not robots.can_fetch(self.settings.user_agent, entry.url):
                                 frontier.mark_skipped(entry.url, reason="robots_disallowed")
-                                pages.append(self._error_page(
+                                err_page = self._error_page(
                                     entry.url, [], "robots_disallowed", "thread",
                                     depth=entry.depth, parent_url=entry.parent_url,
                                     requested_fetch_strategy=requested_fetch_mode,
                                     actual_fetch_strategy="static",
-                                ))
+                                )
+                                self._record_skipped_page(
+                                    request, frontier, err_page, pages,
+                                    seen_canonicals, seen_content_hashes, pagination_counts,
+                                )
                                 progress(len(pages), frontier.queue_size, robots_status)
                                 continue
 
@@ -1404,6 +1571,7 @@ class CrawlEngine(BaseCrawlerEngine):
             termination_budget_reason=termination_budget_reason,
             total_response_bytes=total_response_bytes,
             retries_performed=retries_performed,
+            resumed=resumed,
         )
 
     def _run_coroutine(
@@ -1463,6 +1631,29 @@ class CrawlEngine(BaseCrawlerEngine):
         seen_content_hashes: dict[str, str] = {}
         seen_canonicals: dict[str, str] = {}
         pagination_counts: dict[str, int] = {}
+
+        resumed, resumed_pages, resumed_links, resumed_bytes, resumed_retries, resumed_hashes, resumed_canonicals, resumed_paginations = (
+            self._prepare_resumed_state(request, frontier)
+        )
+        pages.extend(resumed_pages)
+        links.extend(resumed_links)
+        total_response_bytes += resumed_bytes
+        retries_performed += resumed_retries
+        seen_content_hashes.update(resumed_hashes)
+        seen_canonicals.update(resumed_canonicals)
+        pagination_counts.update(resumed_paginations)
+
+        if not resumed and self.database and getattr(request, "crawl_id", ""):
+            self._checkpoint_state(
+                request,
+                frontier,
+                total_response_bytes=total_response_bytes,
+                retries_performed=retries_performed,
+                seen_content_hashes=seen_content_hashes,
+                seen_canonicals=seen_canonicals,
+                pagination_counts=pagination_counts,
+            )
+
         per_host_limit = request.per_host_concurrency if request.per_host_concurrency is not None else concurrency
         throttler = AsyncDomainPolitenessThrottler(request.delay_seconds, per_host_concurrency=per_host_limit)
 
@@ -1503,12 +1694,16 @@ class CrawlEngine(BaseCrawlerEngine):
                         robots, robots_status = self._safe_robots(sync_client, e.url, respect_robots=True)
                         if not robots.can_fetch(self.settings.user_agent, e.url):
                             frontier.mark_skipped(e.url, reason="robots_disallowed")
-                            pages.append(self._error_page(
+                            err_page = self._error_page(
                                 e.url, [], "robots_disallowed", "async",
                                 depth=e.depth, parent_url=e.parent_url,
                                 requested_fetch_strategy=requested_fetch_mode,
                                 actual_fetch_strategy="static",
-                            ))
+                            )
+                            self._record_skipped_page(
+                                request, frontier, err_page, pages,
+                                seen_canonicals, seen_content_hashes, pagination_counts,
+                            )
                             progress(len(pages), frontier.queue_size, robots_status)
                             continue
                     batch_entries.append(e)
@@ -1557,6 +1752,7 @@ class CrawlEngine(BaseCrawlerEngine):
                 termination_budget_reason=termination_budget_reason,
                 total_response_bytes=total_response_bytes,
                 retries_performed=retries_performed,
+                resumed=resumed,
             )
 
         transport = httpx.AsyncHTTPTransport(
@@ -1599,12 +1795,16 @@ class CrawlEngine(BaseCrawlerEngine):
                         robots, robots_status = await self._safe_async_robots(client, entry.url, respect_robots=True, throttler=throttler)
                         if not robots.can_fetch(self.settings.user_agent, entry.url):
                             frontier.mark_skipped(entry.url, reason="robots_disallowed")
-                            pages.append(self._error_page(
+                            err_page = self._error_page(
                                 entry.url, [], "robots_disallowed", "async",
                                 depth=entry.depth, parent_url=entry.parent_url,
                                 requested_fetch_strategy=requested_fetch_mode,
                                 actual_fetch_strategy="static",
-                            ))
+                            )
+                            self._record_skipped_page(
+                                request, frontier, err_page, pages,
+                                seen_canonicals, seen_content_hashes, pagination_counts,
+                            )
                             progress(len(pages), frontier.queue_size, robots_status)
                             continue
 
@@ -1681,6 +1881,7 @@ class CrawlEngine(BaseCrawlerEngine):
             termination_budget_reason=termination_budget_reason,
             total_response_bytes=total_response_bytes,
             retries_performed=retries_performed,
+            resumed=resumed,
         )
 
     def _run_multiprocess(
@@ -1724,6 +1925,28 @@ class CrawlEngine(BaseCrawlerEngine):
         pagination_counts: dict[str, int] = {}
         fatal_error = ""
 
+        resumed, resumed_pages, resumed_links, resumed_bytes, resumed_retries, resumed_hashes, resumed_canonicals, resumed_paginations = (
+            self._prepare_resumed_state(request, frontier)
+        )
+        pages.extend(resumed_pages)
+        links.extend(resumed_links)
+        total_response_bytes += resumed_bytes
+        retries_performed += resumed_retries
+        seen_content_hashes.update(resumed_hashes)
+        seen_canonicals.update(resumed_canonicals)
+        pagination_counts.update(resumed_paginations)
+
+        if not resumed and self.database and getattr(request, "crawl_id", ""):
+            self._checkpoint_state(
+                request,
+                frontier,
+                total_response_bytes=total_response_bytes,
+                retries_performed=retries_performed,
+                seen_content_hashes=seen_content_hashes,
+                seen_canonicals=seen_canonicals,
+                pagination_counts=pagination_counts,
+            )
+
         headers = {
             "User-Agent": self.settings.user_agent,
             "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json,application/xml,text/csv",
@@ -1760,12 +1983,16 @@ class CrawlEngine(BaseCrawlerEngine):
                         robots, robots_status = self._safe_robots(client, entry.url, respect_robots=True, throttler=throttler)
                         if not robots.can_fetch(self.settings.user_agent, entry.url):
                             frontier.mark_skipped(entry.url, reason="robots_disallowed")
-                            pages.append(self._error_page(
+                            err_page = self._error_page(
                                 entry.url, [], "robots_disallowed", "process",
                                 depth=entry.depth, parent_url=entry.parent_url,
                                 requested_fetch_strategy=requested_fetch_mode,
                                 actual_fetch_strategy="static",
-                            ))
+                            )
+                            self._record_skipped_page(
+                                request, frontier, err_page, pages,
+                                seen_canonicals, seen_content_hashes, pagination_counts,
+                            )
                             progress(len(pages), frontier.queue_size, robots_status)
                             continue
                     throttler.throttle(entry.url)
@@ -1810,6 +2037,7 @@ class CrawlEngine(BaseCrawlerEngine):
                 termination_budget_reason=termination_budget_reason,
                 total_response_bytes=total_response_bytes,
                 retries_performed=retries_performed,
+                resumed=resumed,
             )
 
         mp_context = multiprocessing.get_context("spawn")
@@ -1858,12 +2086,16 @@ class CrawlEngine(BaseCrawlerEngine):
                                 robots, robots_status = self._safe_robots(robots_client, entry.url, respect_robots=True, throttler=throttler)
                                 if not robots.can_fetch(self.settings.user_agent, entry.url):
                                     frontier.mark_skipped(entry.url, reason="robots_disallowed")
-                                    pages.append(self._error_page(
+                                    err_page = self._error_page(
                                         entry.url, [], "robots_disallowed", "process",
                                         depth=entry.depth, parent_url=entry.parent_url,
                                         requested_fetch_strategy=requested_fetch_mode,
                                         actual_fetch_strategy="static",
-                                    ))
+                                    )
+                                    self._record_skipped_page(
+                                        request, frontier, err_page, pages,
+                                        seen_canonicals, seen_content_hashes, pagination_counts,
+                                    )
                                     progress(len(pages), frontier.queue_size, robots_status)
                                     continue
 
@@ -1949,6 +2181,17 @@ class CrawlEngine(BaseCrawlerEngine):
                                 )
                                 pages.append(err_page)
                                 frontier.mark_failed(orig_entry.url, str(exc), is_retryable=False)
+                                if self.database and getattr(request, "crawl_id", ""):
+                                    self.database.save_page(request.crawl_id, err_page, [])
+                                    self._checkpoint_state(
+                                        request,
+                                        frontier,
+                                        total_response_bytes=sum(p.response_bytes for p in pages),
+                                        retries_performed=frontier.retry_count,
+                                        seen_content_hashes=seen_content_hashes,
+                                        seen_canonicals=seen_canonicals,
+                                        pagination_counts=pagination_counts,
+                                    )
 
                             progress(len(pages), frontier.queue_size, robots_status)
 
@@ -1986,6 +2229,7 @@ class CrawlEngine(BaseCrawlerEngine):
             termination_budget_reason=termination_budget_reason,
             total_response_bytes=total_response_bytes,
             retries_performed=retries_performed,
+            resumed=resumed,
         )
 
     def _materialize_static(self, request: CrawlRequest, result: tuple[str, tuple[int, dict[str, str], bytes, str] | None, list[dict[str, object]], str]) -> tuple[PageRecord, list[LinkRecord]]:

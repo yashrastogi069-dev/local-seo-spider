@@ -168,9 +168,9 @@ def test_multiprocess_engine_executes_concurrently_with_distinct_pids(server: Co
     """Multiprocess engine must achieve parallel timing, peak concurrency >= 2, and distinct child worker PIDs."""
     server.reset_concurrency_stats()
     urls = [
-        f"{server.base_url}/slow-concurrency/p1?delay=0.45",
-        f"{server.base_url}/slow-concurrency/p2?delay=0.45",
-        f"{server.base_url}/slow-concurrency/p3?delay=0.45",
+        f"{server.base_url}/slow-concurrency/p1?delay=0.75",
+        f"{server.base_url}/slow-concurrency/p2?delay=0.75",
+        f"{server.base_url}/slow-concurrency/p3?delay=0.75",
     ]
     engine = CrawlEngine(_make_settings("process", workers=3))
     req = CrawlRequest(

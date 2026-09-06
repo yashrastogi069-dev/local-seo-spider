@@ -236,3 +236,32 @@ This document records the architectural and engineering decisions made for the L
 - **Consequences**: The crawler operates with bounded predictability, strict politeness isolation, resilient jittered retry recovery, and bulletproof defense against infinite traps.
 
 
+## ADR-015: Durable Frontier Checkpointing, In-Flight Crash Safety (FETCHING -> QUEUED), Schema Versioning, and Idempotent Replay/Resume
+
+- **Status**: Accepted (Phase 2G certified)
+- **Context**: Long-running crawls across large sites or unstable network links can be abruptly terminated by operator cancellation, system crashes, power loss, OOM events, or database transaction interruptions. Without atomic checkpointing, resumed crawls risk re-fetching already crawled pages (wasting network resources and creating duplicate rows in storage), losing discovered but un-crawled URLs, stranding in-flight worker entries forever, or corrupting state across incompatible crawler schema/engine versions.
+- **Decision**:
+  1. Complete State Persistence & Checkpointing (`app/database.py`, `app/frontier.py`):
+     - Dedicated `crawl_frontier_checkpoints` table recording `crawl_id`, `url`, `state`, `depth`, `parent_url`, `retry_count`, `max_retries`, `next_eligible_time`, `error`, `skip_reason`, `duplicate_of`, `status_code`, `discovered_at`.
+     - Crawl metadata checkpoint JSON stored in `crawls.checkpoint_json` recording admitted count, canonical map, alias map, discovered content hashes, and queue ordering.
+     - Atomic transaction guarantees: `save_frontier_checkpoint` executes `BEGIN IMMEDIATE`, clears existing checkpoint rows for the crawl, inserts updated frontier entries, and updates metadata in a single SQLite transaction. If interrupted mid-write, SQLite rolls back to the prior checkpoint automatically.
+  2. Crash Recovery & In-Flight State Recovery (`FETCHING -> QUEUED`):
+     - In `restore_state()`, any item that was in `FrontierState.FETCHING` when the crawler crashed was never materialized in `pages`. It is automatically reset to `FrontierState.QUEUED` and re-enqueued.
+     - `_active_workers` is reset to 0 to prevent queue starvation or premature completion.
+     - Retry pool items are restored with their remaining backoff timestamps and retry attempt counters intact.
+     - Budget expansion un-skipping: If a crawl was capped at `max_urls=N` and resumed with `max_urls=M` (where $M > N$), entries that were previously skipped with `skip_reason="page_limit_reached"` are automatically un-skipped to `QUEUED` up to the expanded budget.
+  3. Storage Idempotency & Replay Safety:
+     - `pages` table enforces `UNIQUE(crawl_id, url)`.
+     - `links` table enforces `UNIQUE(crawl_id, source_url, target_url)`.
+     - Incremental `save_page` executes atomic upsert (`INSERT INTO pages ... ON CONFLICT(crawl_id, url) DO UPDATE`) and (`INSERT INTO links ... ON CONFLICT(crawl_id, source_url, target_url) DO UPDATE`).
+     - Replaying or resuming crawls guarantees zero duplicate rows in the persistent database.
+  4. Version Compatibility & State Corruption Defense:
+     - Explicit versioning on every crawl: `schema_version` (int) and `engine_version` (semver string).
+     - `validate_checkpoint_compatibility()` validates that the stored checkpoint schema version matches `CURRENT_SCHEMA_VERSION` (1) and the major engine version matches `CURRENT_ENGINE_VERSION` (2).
+     - Incompatible schema or engine versions raise `IncompatibleStateError`.
+     - Corrupt checkpoint JSON or unparseable frontier records raise `CorruptStateError`. Fail-closed guarantees prevent silent data corruption.
+  5. Mathematical Reconciliation:
+     - Restored frontier states satisfy `reconcile_accounting()` balance invariant: `discovered == completed + queued + fetching + failed_retryable + failed_final + skipped + duplicate`.
+- **Consequences**: Crawls can be safely interrupted at any point (discovery, fetch, DB write, retry backoff, multi-worker execution) and resumed with zero data loss, zero duplicated records, correct retry accounting, and fail-closed defense against version mismatches.
+
+

@@ -4,25 +4,56 @@ All notable changes, phase executions, and architectural transitions for Local S
 
 ---
 
-## Current Status: Phase 0, Phase 1, Phase 2 Complete (2A-2F Certified) / Ready for Phase 2G
+## Current Status: Phase 0, Phase 1, Phase 2 Complete (2A-2G Certified) / Ready for Phase 2H
 
 ### Current Phase State:
 - **PHASE 0 (Baseline & Forensic Audit)**: COMPLETED / PASSED
 - **PHASE 1 (Evaluation Integrity)**: COMPLETED / PASSED
-- **PHASE 2 (Crawler Core)**: ACTIVE / SUBPHASES 2A-2F CERTIFIED
+- **PHASE 2 (Crawler Core)**: ACTIVE / SUBPHASES 2A-2G CERTIFIED
   - **Subphase 2A (Contracts & State Model)**: COMPLETED / PASSED
   - **Subphase 2B (URL Normalization + Frontier + Crawl Lifecycle)**: COMPLETED / PASSED
   - **Subphase 2C (Four Independent Concurrency Engines)**: COMPLETED / PASSED & CERTIFIED
   - **Subphase 2D (Concurrency, Races, Failure & Resource Safety)**: COMPLETED / PASSED & CERTIFIED
   - **Subphase 2E (Static Fetch + Playwright + Smart Escalation)**: COMPLETED / PASSED & CERTIFIED
   - **Subphase 2F (Robots, Politeness, Retries & Crawl Budgets)**: COMPLETED / PASSED & CERTIFIED
-- **Subphase 2G (Authentication, Sessions & State Handling)**: READY TO BEGIN
+  - **Subphase 2G (Resume, Recovery, Crash Safety & Embedding Auto-Fallback)**: COMPLETED / PASSED & CERTIFIED
+- **Subphase 2H (SSRF Defense, Security & Allowed Hosts Enforcement)**: READY TO BEGIN
 - **PHASE 3 (Universal Extraction)**: PENDING
 - **PHASE 4 (Knowledge/Indexing/Search)**: PENDING
 - **PHASE 5 (RAG Intelligence)**: PENDING
 - **PHASE 6 (Web Intelligence)**: PENDING
 - **PHASE 7 (UI/UX)**: PENDING
 - **PHASE 8 (Final Certification)**: PENDING
+
+---
+
+## [Phase 2G: Resume, Recovery, Crash Safety & Embedding Auto-Fallback] - 2026-09-06
+
+### Added
+- Created `tests/test_crawl_resume_and_recovery.py` (14 tests, 100% passing):
+  - Frontier state persistence across all 8 lifecycle states (`discovered`, `queued`, `fetching`, `completed`, `failed_retryable`, `failed_final`, `skipped`, `duplicate`).
+  - Crash recovery of in-flight `FETCHING` entries to `QUEUED` with `_active_workers` reset to 0.
+  - Checkpoint transaction rollback safety under interruption (`BEGIN IMMEDIATE` in SQLite WAL mode).
+  - Resumption across Serial, Threaded, Coroutine, and Multiprocess engines.
+  - Idempotent database persistence: zero duplicate rows in `pages` and `links` on replay/resume.
+  - Schema & engine version integrity validation (`IncompatibleStateError` on schema/major engine mismatch).
+  - Fail-closed corrupt checkpoint error handling (`CorruptStateError`).
+  - Preserved retry counts and exponential backoff windows across resume lifecycles.
+  - Mathematical accounting reconciliation verification (`reconcile_accounting`).
+  - Budget expansion un-skipping (`restore_state` un-skips `page_limit_reached` URLs when resumed with expanded budget).
+- Created `crawl_frontier_checkpoints` table with index `idx_frontier_checkpoints_crawl_state` on `(crawl_id, state)`.
+- Added `checkpoint_json`, `schema_version`, and `engine_version` columns to `crawls` table.
+- Added `CURRENT_SCHEMA_VERSION = 1` and `CURRENT_ENGINE_VERSION = "2.0.0"` in `app/database.py`.
+- Implemented `save_frontier_checkpoint`, `get_frontier_checkpoint`, `validate_checkpoint_compatibility`, `get_crawled_pages`, and `get_crawled_links` in `app/database.py`.
+- Added atomic upsert semantics: `ON CONFLICT(crawl_id, url) DO UPDATE` in `pages`, and unique index `idx_links_crawl_source_target` with `ON CONFLICT(crawl_id, source_url, target_url) DO UPDATE` in `links`.
+- Implemented `export_state`, `restore_state`, and `get_entries` in `CrawlFrontier` (`app/frontier.py`).
+- Added `remaining_delay` serialization to `FrontierEntry` in `app/types.py` for monotonic time continuity across process restarts and OS reboots.
+- Deduplicated `pages` and `links` by URL in `CrawlEngine._build_crawl_result` for in-memory uniqueness guarantees.
+- Recorded ADR-015 in `DECISIONS.md`.
+
+### Fixed
+- **Embedding Provider `NameError` Crash**: Fixed undefined `logger` symbol in `app/main.py` when catching embedding provider errors, which previously broke crawl post-processing.
+- **Embedding Provider Auto-Fallback**: Updated `Settings.from_environment()` in `app/config.py` to auto-detect `sentence_transformers` availability and cleanly default/fall back to `"hash"` provider when unavailable, preventing unhandled exceptions.
 
 ---
 

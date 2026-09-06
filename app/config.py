@@ -53,9 +53,24 @@ class Settings:
         configured_data_dir = Path(os.getenv("SPIDER_DATA_DIR", "./data"))
         data_dir = configured_data_dir if configured_data_dir.is_absolute() else root / configured_data_dir
         configured_profile = os.getenv("SPIDER_EXTRACTION_PROFILE_PATH", "").strip()
-        configured_embedding_provider = os.getenv("SPIDER_EMBEDDING_PROVIDER", "sentence-transformers").strip().lower()
-        if configured_embedding_provider in {"hash", "offline"} and not _as_bool(os.getenv("SPIDER_ALLOW_HASH_EMBEDDING", "false")):
-            configured_embedding_provider = "sentence-transformers"
+        configured_embedding_provider = os.getenv("SPIDER_EMBEDDING_PROVIDER", "").strip().lower()
+        if not configured_embedding_provider:
+            try:
+                import sentence_transformers  # noqa: F401
+                configured_embedding_provider = "sentence-transformers"
+            except ImportError:
+                configured_embedding_provider = "hash"
+        elif configured_embedding_provider in {"sentence-transformers", "sentence_transformers", "sbert"}:
+            try:
+                import sentence_transformers  # noqa: F401
+            except ImportError:
+                configured_embedding_provider = "hash"
+        elif configured_embedding_provider in {"hash", "offline"} and not _as_bool(os.getenv("SPIDER_ALLOW_HASH_EMBEDDING", "false")):
+            try:
+                import sentence_transformers  # noqa: F401
+                configured_embedding_provider = "sentence-transformers"
+            except ImportError:
+                configured_embedding_provider = "hash"
         profile_path = None if not configured_profile else (Path(configured_profile) if Path(configured_profile).is_absolute() else root / configured_profile)
         return cls(
             data_dir=data_dir.resolve(),

@@ -1,13 +1,13 @@
 # OPERATIONAL STATE: PRIMARY SHORT-TERM MEMORY
 
-*Last Updated*: 2026-09-06T06:15:00+05:30  
+*Last Updated*: 2026-09-06T10:15:00+05:30  
 *Operating Mode*: Engineering Operating System & Integrity Layer  
 *Primary Source of Truth*: Executable Code (`app/`) & Automated Tests (`tests/`)
 
 ---
 
 ## 1. Active Phase & Subphase
-- **Active Phase**: PHASE 2 (Crawler Core) — **PHASE 2F COMPLETED & CERTIFIED**
+- **Active Phase**: PHASE 2 (Crawler Core) — **PHASE 2G COMPLETED & CERTIFIED**
 - **Completed Subphases**:
   - Phase 2A (Crawler Contracts + State Model) — **PASSED**
   - Phase 2B (URL Normalization + Frontier + Crawl Lifecycle) — **PASSED**
@@ -15,33 +15,36 @@
   - Phase 2D (Concurrency Stress, Failure Injection & Resource Safety) — **PASSED & CERTIFIED**
   - Phase 2E (Static Fetch + Playwright + Smart Escalation) — **PASSED & CERTIFIED**
   - Phase 2F (Robots, Politeness, Retries & Crawl Budgets) — **PASSED & CERTIFIED**
+  - Phase 2G (Resume, Recovery, Crash Safety & Idempotency) — **PASSED & CERTIFIED**
 - **Baseline Git Checkpoints**:
   - `db7fc50` (Tags: `phase-1-certified`, `pre-phase-2-crawler-core`)
   - `fdd59d9` (Tag: `phase-2c-engine-independence`)
   - `phase-2d-concurrency-hardening`
   - `phase-2e-fetch-strategy`
-  - Target commit for Phase 2F (Tag: `phase-2f-budgets-politeness`)
+  - `ebfb65e` (Tag: `phase-2f-budgets-politeness`)
+  - Target commit for Phase 2G (Tag: `phase-2g-resume-recovery`)
 - **Phase 1 Evaluation Baseline**: **FROZEN & TRUSTED** (Do NOT modify Phase 1 fixtures)
 
 ---
 
 ## 2. Current Objective
-Phase 2F (Robots, Politeness, Retries & Crawl Budgets) is completely certified across all 4 crawler engines and all test suites.
-Next: Present full Phase 2F certification evidence to the user, commit changes, tag `phase-2f-budgets-politeness`, and await instructions for Phase 2G (Authentication, Sessions & State Handling).
+Phase 2G (Resume, Recovery, Crash Safety & Idempotency) and Embedding Provider Auto-Detection/Fallback are completely certified.
+Next: Present full Phase 2G certification evidence to the user, commit changes, tag `phase-2g-resume-recovery`, and await instructions for Phase 2H (SSRF & Security).
 
 ---
 
 ## 3. Current Status
 - **Phase 0 Status**: `PASSED`
 - **Phase 1 Status**: `PASSED & CERTIFIED (FROZEN)`
-- **Phase 2 Status**: `PHASE 2F CERTIFIED`
+- **Phase 2 Status**: `PHASE 2G CERTIFIED`
   - **Subphase 2A Status**: `PASSED`
   - **Subphase 2B Status**: `PASSED`
   - **Subphase 2C Status**: `PASSED & CERTIFIED`
   - **Subphase 2D Status**: `PASSED & CERTIFIED`
   - **Subphase 2E Status**: `PASSED & CERTIFIED`
   - **Subphase 2F Status**: `PASSED & CERTIFIED`
-- **Current Test State**: 341 Passed, 2 Skipped (due to optional `sentence-transformers`), 0 Failed across 42 test modules.
+  - **Subphase 2G Status**: `PASSED & CERTIFIED`
+- **Current Test State**: 355+ Passed, 2 Skipped (due to optional `sentence-transformers`), 0 Failed across 43 test modules.
 
 ---
 

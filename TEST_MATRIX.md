@@ -117,3 +117,22 @@ This document provides a detailed inventory of all 343 automated unit, integrati
 - Anti-criteria enforcement: normal static HTML containing script tags (analytics, tracking, widgets) is never escalated to browser.
 - Forensic observability: transparent reporting of `requested_fetch_strategy`, `actual_fetch_strategy`, `escalated`, `escalation_reason`, `fetch_duration_ms`, `render_duration_ms`, and `fallback_occurred` with `fallback_reason`.
 
+### 7. Robots, Politeness, Retries & Crawl Budgets (Phase 2F)
+- RFC 9309 robots directives: 5xx and 429 fail-closed, 4xx allow-all, socket errors fail-open with socket failure provenance.
+- User-agent specificity and Crawl-delay parsing per domain.
+- Granular per-host rate limiting and politeness isolation (`DomainPolitenessThrottler`, `AsyncDomainPolitenessThrottler`).
+- Retry classification: retryable transient failures vs non-retryable fatal failures.
+- Bounded retry counts, clamped `Retry-After` header adherence, and randomized exponential backoff jitter.
+- Multi-dimensional crawl budgets (`max_pages`, `max_depth`, `max_bytes`, `max_duration_seconds`, `max_retries`, `redirect_limit`) with `BUDGET_EXHAUSTED` termination.
+- Infinite site defenses: session ID stripping, path loop cycle detection, text content hash deduplication, pagination caps.
+
+### 8. Resume, Recovery, Crash Safety & Idempotency (Phase 2G)
+- Complete frontier lifecycle state persistence in SQLite `crawl_frontier_checkpoints` across all 8 states (`discovered`, `queued`, `fetching`, `completed`, `failed_retryable`, `failed_final`, `skipped`, `duplicate`).
+- Crash recovery: in-flight `FETCHING` entries automatically recovered to `QUEUED` and `_active_workers` reset to 0.
+- Interruption safety: clean recovery after discovery, during fetch, during atomic DB write rollback, during retry backoff, and while multi-workers are active.
+- Idempotent storage: `UNIQUE(crawl_id, url)` on `pages` and `UNIQUE(crawl_id, source_url, target_url)` on `links` with atomic `ON CONFLICT DO UPDATE` upserts. Zero duplicate rows on replay.
+- Cross-engine resume parity: Serial, Threaded, Coroutine, and Multiprocess engines can resume from checkpoint without refetching completed pages or losing pending queue.
+- Version compatibility: schema version (`CURRENT_SCHEMA_VERSION = 1`) and major engine version (`CURRENT_ENGINE_VERSION = "2.0.0"`) validation; fail-closed `IncompatibleStateError`.
+- State corruption defense: corrupt checkpoint JSON or invalid state values rejected with `CorruptStateError`.
+- Mathematical reconciliation: `reconcile_accounting()` verified to balance across multiple resume cycles (`discovered == completed + queued + fetching + failed_retryable + failed_final + skipped + duplicate`).
+
