@@ -264,4 +264,39 @@ This document records the architectural and engineering decisions made for the L
      - Restored frontier states satisfy `reconcile_accounting()` balance invariant: `discovered == completed + queued + fetching + failed_retryable + failed_final + skipped + duplicate`.
 - **Consequences**: Crawls can be safely interrupted at any point (discovery, fetch, DB write, retry backoff, multi-worker execution) and resumed with zero data loss, zero duplicated records, correct retry accounting, and fail-closed defense against version mismatches.
 
+---
+
+## ADR-016: Hosted Embedding Provider Architecture (Gemini API), Model-Independent Abstraction, Multi-Generation Vector Storage, and Re-Embedding Without Recrawling
+
+- **Status**: ACCEPTED / VERIFIED (Phase 2G.1 certified)
+- **Context**:
+  - Local deep neural embedding dependencies (e.g. `sentence-transformers`, `torch`, HuggingFace models) are heavy (~2GB+), slow to install, and create environment friction during development.
+  - Development stage embedding generation should primarily utilize lightweight hosted APIs (Google Gemini Embedding API) without locking the architecture to a single proprietary service.
+  - In the future, the system must support migrating to local high-quality models (Qwen, BGE, Sentence Transformers) or alternative hosted APIs without modifying crawler architecture or requiring expensive site recrawling.
+  - Raw crawled HTML and extracted knowledge chunks in SQLite must remain authoritative. Changing embedding models must be an atomic `re-embedding` operation, not a `recrawling` operation.
+  - Multiple embedding generations for the same chunk must be supported conceptually without assuming a chunk has only one permanent vector representation.
+  - Hash-based embeddings must be explicitly constrained to unit tests, deterministic CI, and offline diagnostics, with transparent fallback policy diagnostics.
+- **Decision**:
+  1. Provider-Independent Abstraction (`app/embeddings.py`):
+     - `EmbeddingProvider` protocol defining `name`, `provider_type`, `model_name`, `dimension`, `health_status`, `embed()`, `embed_batch()`, and `get_metadata()`.
+     - Concrete implementations: `GeminiEmbeddingProvider` (Google Gemini REST API), `SentenceTransformersProvider` (local neural), `HashEmbeddingProvider` (Blake2b pseudo-random projection), and `NullEmbeddingProvider` (BM25-only).
+  2. Hosted Gemini Provider Architecture (`GeminiEmbeddingProvider`):
+     - Communicates with Google Gemini Embedding API (`text-embedding-004`) via `batchEmbedContents`.
+     - Secret protection: API key passed via `x-goog-api-key` header (not query param); key is never exposed in logs, reprs, metadata, or error reports.
+     - Resilient retry protocol: Bounded retries on 429 rate limits and 5xx errors with exponential backoff, jitter (0.8-1.2), and `Retry-After` header parsing.
+     - Fail-closed without retry on 401/403 (`AUTHENTICATION_FAILED`) and 404 (`MISCONFIGURED`).
+  3. Explicit Fallback Policies (`FallbackPolicy`):
+     - `FAIL_CLOSED`: Missing credentials or dependencies fail loudly with descriptive errors.
+     - `FALLBACK_TO_HASH`: Replaces unavailable neural models with deterministic hash projections while flagging `degraded_mode=True`.
+     - `BM25_ONLY`: Disables vector representations entirely for purely lexical retrieval.
+     - `AUTO`: Resolves to Gemini if credentials exist, else local Sentence Transformers if installed, else Hash with `fallback_occurred=True` and `degraded_mode=True`.
+  4. Multi-Generation Vector Storage & Re-Embedding Without Recrawling (`app/database.py`):
+     - SQLite `vector_embeddings` table upgraded with `model`, `dimension`, `created_at`, `content_hash`, `metadata_json`, indexed by `(crawl_id, provider, dimension)`.
+     - `reembed_knowledge(crawl_id, embedder)` reads stored `knowledge_chunks`, batches new vector embeddings, and updates `vector_embeddings` atomically. Crawled pages and source links are completely untouched.
+     - Dimension mismatch prevention: `search_hybrid_knowledge` filters vectors by matching `provider`, `model`, and exact query vector `dimension`, preventing cross-dimension vector comparison.
+  5. Crawling Independence:
+     - The crawler core (`app/crawler.py`) has zero imports or dependencies on the embedding subsystem. Crawling never fails or blocks on embedding provider unavailability.
+- **Consequences**: Developers can immediately run semantic RAG locally with zero heavy PyTorch installs using Google Gemini API, test offline using hash embeddings, migrate models on-demand without recrawling, and protect API keys from exposure.
+
+
 

@@ -7,7 +7,7 @@
 ---
 
 ## 1. Active Phase & Subphase
-- **Active Phase**: PHASE 2 (Crawler Core) — **PHASE 2G COMPLETED & CERTIFIED**
+- **Active Phase**: PHASE 2 (Crawler Core) — **PHASE 2G.1 COMPLETED & CERTIFIED**
 - **Completed Subphases**:
   - Phase 2A (Crawler Contracts + State Model) — **PASSED**
   - Phase 2B (URL Normalization + Frontier + Crawl Lifecycle) — **PASSED**
@@ -16,27 +16,29 @@
   - Phase 2E (Static Fetch + Playwright + Smart Escalation) — **PASSED & CERTIFIED**
   - Phase 2F (Robots, Politeness, Retries & Crawl Budgets) — **PASSED & CERTIFIED**
   - Phase 2G (Resume, Recovery, Crash Safety & Idempotency) — **PASSED & CERTIFIED**
+  - Phase 2G.1 (Hosted Embedding Provider Architecture & Re-Embedding) — **PASSED & CERTIFIED**
 - **Baseline Git Checkpoints**:
   - `db7fc50` (Tags: `phase-1-certified`, `pre-phase-2-crawler-core`)
   - `fdd59d9` (Tag: `phase-2c-engine-independence`)
   - `phase-2d-concurrency-hardening`
   - `phase-2e-fetch-strategy`
   - `ebfb65e` (Tag: `phase-2f-budgets-politeness`)
-  - Target commit for Phase 2G (Tag: `phase-2g-resume-recovery`)
+  - `28c686f` (Tag: `phase-2g-resume-recovery`)
+  - Target commit for Phase 2G.1 (Tag: `phase-2g1-hosted-embedding-provider`)
 - **Phase 1 Evaluation Baseline**: **FROZEN & TRUSTED** (Do NOT modify Phase 1 fixtures)
 
 ---
 
 ## 2. Current Objective
-Phase 2G (Resume, Recovery, Crash Safety & Idempotency) and Embedding Provider Auto-Detection/Fallback are completely certified.
-Next: Present full Phase 2G certification evidence to the user, commit changes, tag `phase-2g-resume-recovery`, and await instructions for Phase 2H (SSRF & Security).
+Phase 2G.1 (Hosted Embedding Provider Architecture, Re-Embedding Without Recrawling, Transparent Fallbacks & Dimension Isolation) is completely certified.
+Next: Present full Phase 2G.1 certification evidence, commit changes, tag `phase-2g1-hosted-embedding-provider`, and await user directive before beginning Phase 2H.
 
 ---
 
 ## 3. Current Status
 - **Phase 0 Status**: `PASSED`
 - **Phase 1 Status**: `PASSED & CERTIFIED (FROZEN)`
-- **Phase 2 Status**: `PHASE 2G CERTIFIED`
+- **Phase 2 Status**: `PHASE 2G.1 CERTIFIED`
   - **Subphase 2A Status**: `PASSED`
   - **Subphase 2B Status**: `PASSED`
   - **Subphase 2C Status**: `PASSED & CERTIFIED`
@@ -44,7 +46,8 @@ Next: Present full Phase 2G certification evidence to the user, commit changes, 
   - **Subphase 2E Status**: `PASSED & CERTIFIED`
   - **Subphase 2F Status**: `PASSED & CERTIFIED`
   - **Subphase 2G Status**: `PASSED & CERTIFIED`
-- **Current Test State**: 355+ Passed, 2 Skipped (due to optional `sentence-transformers`), 0 Failed across 43 test modules.
+  - **Subphase 2G.1 Status**: `PASSED & CERTIFIED`
+- **Current Test State**: 381+ Passed, 3 Skipped (optional `sentence-transformers` and live external Gemini API smoke test), 0 Failed across 44 test modules.
 
 ---
 

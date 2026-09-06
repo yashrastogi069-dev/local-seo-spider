@@ -136,3 +136,16 @@ This document provides a detailed inventory of all 343 automated unit, integrati
 - State corruption defense: corrupt checkpoint JSON or invalid state values rejected with `CorruptStateError`.
 - Mathematical reconciliation: `reconcile_accounting()` verified to balance across multiple resume cycles (`discovered == completed + queued + fetching + failed_retryable + failed_final + skipped + duplicate`).
 
+### 9. Hosted Embedding Provider Architecture & Model Migration (Phase 2G.1)
+- Google Gemini Embedding API integration (`text-embedding-004`) with single and batch embedding (`batchEmbedContents`).
+- Bounded retries on HTTP 429 rate limits and 5xx errors with exponential backoff and `Retry-After` adherence.
+- Fail-closed behavior on 401/403 authentication failures and 404 model misconfigurations without infinite retries.
+- Secret safety: API keys passed via `x-goog-api-key` header and redacted from logs, reprs, metadata, and error strings.
+- Fallback policies (`FAIL_CLOSED`, `FALLBACK_TO_HASH`, `BM25_ONLY`, `AUTO`) with full diagnostic reporting.
+- Multi-generation vector persistence: `vector_embeddings` records `provider`, `model`, `dimension`, `created_at`, `content_hash`, and `metadata_json`.
+- Model migration without recrawling: `reembed_knowledge` updates vector representations while keeping source pages and chunks authoritative.
+- Dimension mismatch defense: `search_hybrid_knowledge` filters strictly by provider, model, and matching vector dimension.
+- Clean batching bounds (batch size $\le 100$).
+- Conditional live smoke testing: live verification when `GEMINI_API_KEY` is present, marked `UNVERIFIED LIVE` in offline/mocked environments.
+
+

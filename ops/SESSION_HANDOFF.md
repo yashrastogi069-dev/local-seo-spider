@@ -11,7 +11,7 @@ This repository houses `local-seo-spider`, an enterprise semantic crawler and RA
 
 - Phase 0 (Baseline & Forensic Audit): COMPLETED & CERTIFIED.
 - Phase 1 (Evaluation Integrity): COMPLETED & CERTIFIED (Baseline permanently frozen at `db7fc50`).
-- Phase 2 (Crawler Core): ACTIVE / SUBPHASES 2A-2G FULLY CERTIFIED.
+- Phase 2 (Crawler Core): ACTIVE / SUBPHASES 2A-2G.1 FULLY CERTIFIED.
   - Subphase 2A (Crawler Contracts + State Model): COMPLETED & CERTIFIED (`phase-2a-crawler-contracts`).
   - Subphase 2B (URL Normalization + Frontier + Crawl Lifecycle): COMPLETED & CERTIFIED (`phase-2b-frontier`).
   - Subphase 2C (Four Independent Concurrency Engines): COMPLETED & CERTIFIED (`phase-2c-engine-independence`).
@@ -19,29 +19,23 @@ This repository houses `local-seo-spider`, an enterprise semantic crawler and RA
   - Subphase 2E (Static Fetch + Playwright + Smart Escalation): COMPLETED & CERTIFIED (`phase-2e-fetch-strategy`).
   - Subphase 2F (Robots, Politeness, Retries & Crawl Budgets): COMPLETED & CERTIFIED (`phase-2f-budgets-politeness`).
   - Subphase 2G (Resume, Recovery, Crash Safety & Embedding Auto-Fallback): COMPLETED & CERTIFIED (`phase-2g-resume-recovery`).
+  - Subphase 2G.1 (Hosted Embedding Provider Architecture & Re-Embedding): COMPLETED & CERTIFIED (`phase-2g1-hosted-embedding-provider`).
 - Subphase 2H (SSRF Defense, Security & Allowed Hosts Enforcement): READY TO BEGIN.
 
-All 367 automated tests pass (365 passed, 2 skipped solely due to optional `sentence-transformers` package). Zero failures, zero regressions across all 43 test modules.
+All 384 automated tests pass (381 passed, 3 skipped solely due to optional `sentence-transformers` and live external Gemini API key requirement). Zero failures, zero regressions across all 44 test modules.
 
 ---
 
 ## 2. Active Phase Status
-- **Active Phase**: PHASE 2 (Crawler Core) — **SUBPHASE 2G COMPLETED & CERTIFIED**.
-- **Completed Subphase**: Subphase 2G (Resume, Recovery, Crash Safety & Embedding Auto-Fallback).
-  - All 14 targeted tests pass in `tests/test_crawl_resume_and_recovery.py`.
-  - Frontier state persistence across all 8 lifecycle states (`discovered`, `queued`, `fetching`, `completed`, `failed_retryable`, `failed_final`, `skipped`, `duplicate`).
-  - Crash recovery of in-flight `FETCHING` entries safely transitions them back to `QUEUED` with `_active_workers` reset to 0, preventing deadlock or premature termination.
-  - Atomic checkpoints written in `BEGIN IMMEDIATE` transactions under SQLite WAL mode with zero data corruption on interruption.
-  - Multi-engine resume: Serial, Threaded, Coroutine, and Multiprocess engines cleanly resume from checkpoints.
-  - Idempotent database persistence: zero duplicate rows in `pages` or `links` on crawl replay or resume via SQLite `ON CONFLICT DO UPDATE`.
-  - Schema & engine version integrity: `CURRENT_SCHEMA_VERSION = 1` and `CURRENT_ENGINE_VERSION = "2.0.0"` with strict fail-closed `IncompatibleStateError`.
-  - Fail-closed corrupt checkpoint error handling: invalid state JSON or enums raise `CorruptStateError`.
-  - Preserved retry counts and exponential backoff windows across resume lifecycles.
-  - Mathematical accounting reconciliation verification (`reconcile_accounting`).
-  - Budget expansion un-skipping (`restore_state` automatically un-skips `page_limit_reached` URLs when resumed with expanded budget).
-  - In-memory uniqueness deduplication of pages and links in `CrawlEngine._build_crawl_result`.
-  - Monotonic clock continuity across OS reboots via `remaining_delay` serialization in `FrontierEntry`.
-  - Embedding Provider Fix: undefined `logger` symbol resolved; auto-fallback to `"hash"` provider when `sentence-transformers` is unavailable, preventing unhandled exceptions.
+- **Active Phase**: PHASE 2 (Crawler Core) — **SUBPHASE 2G.1 COMPLETED & CERTIFIED**.
+- **Completed Subphase**: Subphase 2G.1 (Hosted Embedding Provider Architecture & Re-Embedding).
+  - Clean `EmbeddingProvider` Protocol with `embed`, `embed_batch`, `get_metadata`.
+  - Hosted Google Gemini provider (`GeminiEmbeddingProvider`) with REST `batchEmbedContents`, header-only auth (`x-goog-api-key`), sub-batching ($\le 100$), and `Retry-After` adherence.
+  - Fallback policies (`FAIL_CLOSED`, `FALLBACK_TO_HASH`, `BM25_ONLY`, `AUTO`) with full diagnostic resolution tracking.
+  - Multi-generation vector schema (`vector_embeddings` with `model`, `dimension`, `created_at`, `content_hash`, `metadata_json`).
+  - Re-embedding without recrawling (`reembed_knowledge` endpoint and DB routine).
+  - Dimension and model isolation preventing cross-model vector corruption.
+  - 17 tests in `tests/test_hosted_embeddings.py` (16 passed, 1 skipped cleanly).
 - **Next Phase In Line**: Subphase 2H (SSRF Defense, Security & Allowed Hosts Enforcement).
 
 ---

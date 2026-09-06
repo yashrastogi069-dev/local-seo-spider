@@ -32,6 +32,10 @@ class Settings:
     embedding_provider: str = "sentence-transformers"
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_dimension: int = 384
+    embedding_fallback_policy: str = "auto"
+    gemini_api_key: str = ""
+    embedding_batch_size: int = 64
+    embedding_timeout_seconds: float = 30.0
     answer_provider: str = "evidence"
     ollama_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "llama3.2"
@@ -53,24 +57,42 @@ class Settings:
         configured_data_dir = Path(os.getenv("SPIDER_DATA_DIR", "./data"))
         data_dir = configured_data_dir if configured_data_dir.is_absolute() else root / configured_data_dir
         configured_profile = os.getenv("SPIDER_EXTRACTION_PROFILE_PATH", "").strip()
+        gemini_key = os.getenv("SPIDER_GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
         configured_embedding_provider = os.getenv("SPIDER_EMBEDDING_PROVIDER", "").strip().lower()
         if not configured_embedding_provider:
-            try:
-                import sentence_transformers  # noqa: F401
-                configured_embedding_provider = "sentence-transformers"
-            except ImportError:
-                configured_embedding_provider = "hash"
+            if gemini_key:
+                configured_embedding_provider = "google"
+            else:
+                try:
+                    import sentence_transformers  # noqa: F401
+                    configured_embedding_provider = "sentence-transformers"
+                except ImportError:
+                    configured_embedding_provider = "hash"
+        elif configured_embedding_provider in {"google", "gemini"}:
+            pass
         elif configured_embedding_provider in {"sentence-transformers", "sentence_transformers", "sbert"}:
             try:
                 import sentence_transformers  # noqa: F401
             except ImportError:
                 configured_embedding_provider = "hash"
         elif configured_embedding_provider in {"hash", "offline"} and not _as_bool(os.getenv("SPIDER_ALLOW_HASH_EMBEDDING", "false")):
-            try:
-                import sentence_transformers  # noqa: F401
-                configured_embedding_provider = "sentence-transformers"
-            except ImportError:
-                configured_embedding_provider = "hash"
+            if gemini_key:
+                configured_embedding_provider = "google"
+            else:
+                try:
+                    import sentence_transformers  # noqa: F401
+                    configured_embedding_provider = "sentence-transformers"
+                except ImportError:
+                    configured_embedding_provider = "hash"
+
+        default_model = "text-embedding-004" if configured_embedding_provider in {"google", "gemini"} else "sentence-transformers/all-MiniLM-L6-v2"
+        configured_model = os.getenv("SPIDER_EMBEDDING_MODEL", default_model)
+        default_dim = 768 if configured_embedding_provider in {"google", "gemini"} else 384
+        configured_dim = int(os.getenv("SPIDER_EMBEDDING_DIMENSION", str(default_dim)))
+        fallback_policy = os.getenv("SPIDER_EMBEDDING_FALLBACK_POLICY", "auto").strip().lower()
+        batch_size = max(1, min(100, int(os.getenv("SPIDER_EMBEDDING_BATCH_SIZE", "64"))))
+        emb_timeout = max(5.0, min(120.0, float(os.getenv("SPIDER_EMBEDDING_TIMEOUT_SECONDS", "30.0"))))
+
         profile_path = None if not configured_profile else (Path(configured_profile) if Path(configured_profile).is_absolute() else root / configured_profile)
         return cls(
             data_dir=data_dir.resolve(),
@@ -88,8 +110,12 @@ class Settings:
             render_enabled=_as_bool(os.getenv("SPIDER_RENDER_ENABLED", "true")),
             extraction_profile_path=profile_path.resolve() if profile_path else None,
             embedding_provider=configured_embedding_provider,
-            embedding_model=os.getenv("SPIDER_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"),
-            embedding_dimension=max(8, min(4096, int(os.getenv("SPIDER_EMBEDDING_DIMENSION", "384")))),
+            embedding_model=configured_model,
+            embedding_dimension=max(8, min(4096, configured_dim)),
+            embedding_fallback_policy=fallback_policy,
+            gemini_api_key=gemini_key,
+            embedding_batch_size=batch_size,
+            embedding_timeout_seconds=emb_timeout,
             answer_provider=os.getenv("SPIDER_ANSWER_PROVIDER", "evidence"),
             ollama_url=os.getenv("SPIDER_OLLAMA_URL", "http://127.0.0.1:11434"),
             ollama_model=os.getenv("SPIDER_OLLAMA_MODEL", "llama3.2"),

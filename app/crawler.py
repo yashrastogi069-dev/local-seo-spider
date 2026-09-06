@@ -290,7 +290,11 @@ class BaseCrawlerEngine:
         seen_content_hashes: dict[str, str] | None = None,
         pagination_counts: dict[str, int] | None = None,
     ) -> None:
-        pages.append(page)
+        existing_idx = next((i for i, p in enumerate(pages) if p.url == page.url), None)
+        if existing_idx is not None:
+            pages[existing_idx] = page
+        else:
+            pages.append(page)
         if self.database and getattr(request, "crawl_id", ""):
             self.database.save_page(request.crawl_id, page, [])
             self._checkpoint_state(
@@ -944,7 +948,11 @@ class BaseCrawlerEngine:
         else:
             frontier.mark_completed(page.url, status_code=page.status_code or 200)
 
-        pages.append(page)
+        existing_idx = next((i for i, p in enumerate(pages) if p.url == page.url), None)
+        if existing_idx is not None:
+            pages[existing_idx] = page
+        else:
+            pages.append(page)
         links.extend(page_links)
         self._enqueue_discovered(request, page, page_links, frontier, pagination_counts)
         if self.database and getattr(request, "crawl_id", ""):
@@ -2179,7 +2187,11 @@ class CrawlEngine(BaseCrawlerEngine):
                                     requested_fetch_strategy=requested_fetch_mode,
                                     actual_fetch_strategy="static",
                                 )
-                                pages.append(err_page)
+                                existing_idx = next((i for i, p in enumerate(pages) if p.url == err_page.url), None)
+                                if existing_idx is not None:
+                                    pages[existing_idx] = err_page
+                                else:
+                                    pages.append(err_page)
                                 frontier.mark_failed(orig_entry.url, str(exc), is_retryable=False)
                                 if self.database and getattr(request, "crawl_id", ""):
                                     self.database.save_page(request.crawl_id, err_page, [])

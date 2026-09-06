@@ -123,7 +123,25 @@ This document defines the strict, non-negotiable release gates for every phase o
 - [x] Dedicated test suite: 14 tests in `tests/test_crawl_resume_and_recovery.py` pass 100%.
 - **SUBPHASE 2G GATE STATUS**: **PASSED**
 
-- **GATE STATUS**: **PASSED (Phase 2G Certified)**
+#### Subphase 2G.1: Hosted Embedding Provider Architecture
+- [x] Clean, provider-independent `EmbeddingProvider` Protocol with `embed`, `embed_batch`, and `get_metadata`.
+- [x] Hosted API provider (`GeminiEmbeddingProvider`) supporting Google Gemini REST API (`batchEmbedContents`), configurable model (default `text-embedding-004`), and customizable dimension (default 768).
+- [x] Secure API key handling via `x-goog-api-key` header (never in query parameter, never logged, never exposed in repr or metadata).
+- [x] Deterministic hash provider (`HashEmbeddingProvider`) with 384-dim Blake2b feature hashing for offline and unit test execution.
+- [x] Local neural provider (`SentenceTransformersProvider`) isolated from crawler core dependencies.
+- [x] Null embedding provider (`NullEmbeddingProvider`) for zero-vector BM25-only operation.
+- [x] Transparent fallback policies (`FAIL_CLOSED`, `FALLBACK_TO_HASH`, `BM25_ONLY`, `AUTO`) with diagnostic fields (`requested_provider`, `actual_provider`, `fallback_occurred`, `fallback_reason`, `degraded_mode`).
+- [x] Categorized provider health (`AVAILABLE`, `UNAVAILABLE`, `RATE_LIMITED`, `AUTHENTICATION_FAILED`, `TEMPORARY_FAILURE`, `MISCONFIGURED`, `UNVERIFIED_LIVE`).
+- [x] Multi-generation vector storage: SQLite `vector_embeddings` upgraded with `model`, `dimension`, `created_at`, `content_hash`, `metadata_json`.
+- [x] Re-embedding without recrawling: `reembed_knowledge(crawl_id, embedder)` recomputes vectors for existing chunks without modifying crawled pages or links.
+- [x] Dimension and model isolation: `search_hybrid_knowledge` prevents cross-model or cross-dimension vector corruption.
+- [x] Batching ($\le 100$) with backoff, jitter (0.8-1.2), and `Retry-After` adherence.
+- [x] Zero crawler dependency on embedding availability (crawl continues regardless of embedding provider health).
+- [x] 17 comprehensive tests in `tests/test_hosted_embeddings.py` (16 passed, 1 skipped cleanly when live key absent).
+- [x] ADR-016 recorded in `DECISIONS.md`.
+- **SUBPHASE 2G.1 GATE STATUS**: **PASSED**
+
+- **GATE STATUS**: **PASSED (Phase 2G & 2G.1 Certified)**
 
 ### PHASE 3: Universal Extraction
 - [x] Preservation of JSON deep semantics, scalar types, and nested object relationships.

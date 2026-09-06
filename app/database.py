@@ -140,6 +140,7 @@ class Database:
                   provider TEXT NOT NULL, dimension INTEGER NOT NULL, embedding BLOB NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_vectors_crawl ON vector_embeddings(crawl_id);
+                CREATE INDEX IF NOT EXISTS idx_vectors_crawl_provider_dim ON vector_embeddings(crawl_id, provider, dimension);
                 CREATE TABLE IF NOT EXISTS workflows (
                   id TEXT PRIMARY KEY, name TEXT NOT NULL, definition_json TEXT NOT NULL,
                   active INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
@@ -176,6 +177,7 @@ class Database:
             self._ensure_crawl_columns(conn)
             self._ensure_page_columns(conn)
             self._ensure_knowledge_columns(conn)
+            self._ensure_vector_columns(conn)
 
     @staticmethod
     def _ensure_page_columns(conn: sqlite3.Connection) -> None:
@@ -247,6 +249,21 @@ class Database:
         for name, definition in required.items():
             if name not in existing:
                 conn.execute(f"ALTER TABLE crawls ADD COLUMN {name} {definition}")
+
+    @staticmethod
+    def _ensure_vector_columns(conn: sqlite3.Connection) -> None:
+        """Upgrade vector_embeddings table to support multi-model metadata without recrawling."""
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(vector_embeddings)")}
+        required = {
+            "model": "TEXT NOT NULL DEFAULT ''",
+            "created_at": "TEXT NOT NULL DEFAULT ''",
+            "content_hash": "TEXT NOT NULL DEFAULT ''",
+            "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+        }
+        for name, definition in required.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE vector_embeddings ADD COLUMN {name} {definition}")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_vectors_crawl_provider_dim ON vector_embeddings(crawl_id, provider, dimension)")
 
     def create_crawl(self, request: CrawlRequest) -> str:
         crawl_id = request.crawl_id or str(uuid4())
@@ -485,10 +502,16 @@ class Database:
         """Replace one crawl's local lexical and vector indexes atomically."""
         materialized = list(chunks)
         active_embedder = embedder or HashEmbeddingProvider()
+        active_model = getattr(active_embedder, "model_name", active_embedder.name)
+        active_prov = getattr(active_embedder, "provider_type", active_embedder.name)
+        now_ts = now()
+
         with self.connect() as conn:
             conn.execute("DELETE FROM knowledge_fts WHERE crawl_id = ?", (crawl_id,))
             conn.execute("DELETE FROM vector_embeddings WHERE crawl_id = ?", (crawl_id,))
             conn.execute("DELETE FROM knowledge_chunks WHERE crawl_id = ?", (crawl_id,))
+
+            chunk_meta = []
             for chunk in materialized:
                 cursor = conn.execute(
                     """INSERT INTO knowledge_chunks (
@@ -498,17 +521,114 @@ class Database:
                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     chunk.as_row(),
                 )
+                chunk_id = cursor.lastrowid
                 conn.execute(
                     """INSERT INTO knowledge_fts (chunk_id, crawl_id, url, title, heading_path, content)
                        VALUES (?, ?, ?, ?, ?, ?)""",
-                    (cursor.lastrowid, crawl_id, chunk.url, chunk.title, chunk.heading_path, chunk.content),
+                    (chunk_id, crawl_id, chunk.url, chunk.title, chunk.heading_path, chunk.content),
                 )
-                embedding = array("f", active_embedder.embed(chunk.content))
-                conn.execute(
-                    """INSERT INTO vector_embeddings (chunk_id, crawl_id, provider, dimension, embedding)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (cursor.lastrowid, crawl_id, active_embedder.name, len(embedding), embedding.tobytes()),
-                )
+                chunk_meta.append((chunk_id, chunk.content, chunk.content_hash))
+
+            if chunk_meta and getattr(active_embedder, "dimension", 0) > 0:
+                texts = [item[1] for item in chunk_meta]
+                try:
+                    embeddings = active_embedder.embed_batch(texts, task_type="RETRIEVAL_DOCUMENT")
+                except Exception:
+                    embeddings = [active_embedder.embed(t, task_type="RETRIEVAL_DOCUMENT") for t in texts]
+
+                vector_rows = []
+                for (c_id, _, c_hash), vec in zip(chunk_meta, embeddings):
+                    if vec:
+                        emb_arr = array("f", vec)
+                        meta_dict = {
+                            "provider": active_prov,
+                            "model": active_model,
+                            "dimension": len(emb_arr),
+                            "created_at": now_ts,
+                            "task_type": "RETRIEVAL_DOCUMENT",
+                        }
+                        vector_rows.append((
+                            c_id, crawl_id, active_embedder.name, active_model,
+                            len(emb_arr), emb_arr.tobytes(), now_ts, c_hash, json.dumps(meta_dict)
+                        ))
+
+                if vector_rows:
+                    conn.executemany(
+                        """INSERT OR REPLACE INTO vector_embeddings (
+                               chunk_id, crawl_id, provider, model, dimension, embedding, created_at, content_hash, metadata_json
+                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        vector_rows,
+                    )
+
+    def reembed_knowledge(self, crawl_id: str, embedder: EmbeddingProvider) -> dict[str, Any]:
+        """Re-embed an existing crawl's knowledge chunks with a new model/provider without recrawling or modifying source content."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT id, content, content_hash FROM knowledge_chunks WHERE crawl_id = ? ORDER BY id""",
+                (crawl_id,),
+            ).fetchall()
+
+        if not rows:
+            return {
+                "chunks_embedded": 0,
+                "provider": embedder.name,
+                "model": getattr(embedder, "model_name", embedder.name),
+                "dimension": getattr(embedder, "dimension", 0),
+            }
+
+        active_model = getattr(embedder, "model_name", embedder.name)
+        active_prov = getattr(embedder, "provider_type", embedder.name)
+        now_ts = now()
+        texts = [r["content"] for r in rows]
+
+        try:
+            embeddings = embedder.embed_batch(texts, task_type="RETRIEVAL_DOCUMENT")
+        except Exception:
+            embeddings = [embedder.embed(t, task_type="RETRIEVAL_DOCUMENT") for t in texts]
+
+        vector_rows = []
+        for r, vec in zip(rows, embeddings):
+            if vec:
+                emb_arr = array("f", vec)
+                meta_dict = {
+                    "provider": active_prov,
+                    "model": active_model,
+                    "dimension": len(emb_arr),
+                    "created_at": now_ts,
+                    "task_type": "RETRIEVAL_DOCUMENT",
+                    "reembedded": True,
+                }
+                vector_rows.append((
+                    r["id"], crawl_id, embedder.name, active_model,
+                    len(emb_arr), emb_arr.tobytes(), now_ts, r["content_hash"], json.dumps(meta_dict)
+                ))
+
+        with self.connect() as conn:
+            conn.executemany(
+                """INSERT OR REPLACE INTO vector_embeddings (
+                       chunk_id, crawl_id, provider, model, dimension, embedding, created_at, content_hash, metadata_json
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                vector_rows,
+            )
+
+        return {
+            "chunks_embedded": len(vector_rows),
+            "provider": embedder.name,
+            "model": active_model,
+            "dimension": embedder.dimension,
+            "reembedded_at": now_ts,
+        }
+
+    def get_vector_embeddings_metadata(self, crawl_id: str) -> list[dict[str, Any]]:
+        """Retrieve distinct vector embedding generations and their metadata for a crawl."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT provider, model, dimension, COUNT(*) as chunk_count, MAX(created_at) as latest_created_at
+                   FROM vector_embeddings WHERE crawl_id = ?
+                   GROUP BY provider, model, dimension""",
+                (crawl_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def get_knowledge_chunks(self, crawl_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -654,7 +774,7 @@ class Database:
         query_terms = self._query_terms(query)
         clean_query = " ".join(query.lower().split())
         active_embedder = embedder or HashEmbeddingProvider()
-        query_vector = active_embedder.embed(query)
+        query_vector = active_embedder.embed(query, task_type="RETRIEVAL_QUERY")
 
         # 1. Lexical-only ablation
         if ablation_mode == "lexical_only":
@@ -672,6 +792,7 @@ class Database:
                 selected.append(enriched)
             return selected
 
+        active_model = getattr(active_embedder, "model_name", active_embedder.name)
         with self.connect() as conn:
             rows = conn.execute(
                 """SELECT k.id, k.page_id, k.crawl_id, k.url, k.canonical_url, k.title, k.section,
@@ -679,8 +800,8 @@ class Database:
                           k.crawl_timestamp, k.parent_url, k.depth, k.content_hash, k.content, k.chunk_index,
                           v.embedding
                    FROM vector_embeddings v JOIN knowledge_chunks k ON k.id = v.chunk_id
-                   WHERE v.crawl_id = ? AND v.provider = ? AND v.dimension = ?""",
-                (crawl_id, active_embedder.name, len(query_vector)),
+                   WHERE v.crawl_id = ? AND v.provider = ? AND (v.model = ? OR ? = '' OR v.model = '') AND v.dimension = ?""",
+                (crawl_id, active_embedder.name, active_model, active_model, len(query_vector)),
             ).fetchall()
         vector_candidates = []
         for row in rows:

@@ -13,7 +13,7 @@ from typing import Annotated
 logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import uvicorn
@@ -27,7 +27,7 @@ from app.crawler import CrawlEngine
 from app.agentic import agentic_retrieve
 from app.answering import LocalAnswerer
 from app.database import Database, now
-from app.embeddings import build_embedding_provider
+from app.embeddings import EmbeddingProvider, build_embedding_provider, resolve_embedding_provider
 from app.exports import write_csv_exports, write_html_report, write_json_exports
 from app.types import CrawlRequest
 from app.urltools import UrlValidationError, is_same_host, normalize_url, visible_url
@@ -297,12 +297,38 @@ def crawl_comparison(request: Request, crawl_id: str, baseline_id: str) -> HTMLR
     return templates.TemplateResponse(request, "crawl_comparison.html", _context(request, crawl=current, baseline=baseline, comparison=comparison))
 
 
-@lru_cache(maxsize=2)
-def _embedding_provider(provider: str, model: str, dimension: int):
+@lru_cache(maxsize=4)
+def _embedding_provider(
+    provider: str,
+    model: str,
+    dimension: int,
+    fallback_policy: str | None = None,
+    api_key: str | None = None,
+) -> EmbeddingProvider:
     try:
-        return build_embedding_provider(provider, model, dimension)
+        resolution = resolve_embedding_provider(
+            provider_name=provider,
+            model_name=model,
+            dimension=dimension,
+            api_key=api_key or getattr(settings, "gemini_api_key", ""),
+            fallback_policy=fallback_policy or getattr(settings, "embedding_fallback_policy", "auto"),
+            settings=settings,
+        )
+        if resolution.fallback_occurred:
+            logger.warning(
+                "Embedding fallback occurred: requested=%s, actual=%s, reason=%s (degraded=%s)",
+                resolution.requested_provider,
+                resolution.actual_provider,
+                resolution.fallback_reason,
+                resolution.degraded_mode,
+            )
+        return resolution.provider_instance
     except Exception as exc:
-        logger.warning("Embedding provider '%s' unavailable (%s); falling back to hash provider.", provider, exc)
+        pol = fallback_policy or getattr(settings, "embedding_fallback_policy", "auto")
+        pol_str = pol.value if hasattr(pol, "value") else str(pol)
+        if pol_str.lower() in {"fail_closed", "failclosed"}:
+            raise
+        logger.warning("Embedding provider '%s' resolution failed (%s); falling back to hash provider.", provider, exc)
         return build_embedding_provider("hash", dimension=dimension)
 
 
@@ -340,6 +366,26 @@ def reindex_knowledge(request: Request, crawl_id: str) -> HTMLResponse:
         return templates.TemplateResponse(request, "partials/knowledge_status.html", _context(request, count=count, error=""))
     except Exception as exc:
         return templates.TemplateResponse(request, "partials/knowledge_status.html", _context(request, count=database.knowledge_count(crawl_id), error=f"Knowledge rebuild failed: {type(exc).__name__}: {exc}"), status_code=500)
+
+
+def _reembed_knowledge(crawl_id: str, provider: str = "", model: str = "", dimension: int = 0) -> dict[str, object]:
+    prov = provider or settings.embedding_provider
+    mod = model or settings.embedding_model
+    dim = dimension or settings.embedding_dimension
+    embedder = _embedding_provider(prov, mod, dim)
+    return database.reembed_knowledge(crawl_id, embedder)
+
+
+@app.post("/crawls/{crawl_id}/knowledge/reembed", response_class=JSONResponse)
+def reembed_knowledge_endpoint(request: Request, crawl_id: str, provider: str = "", model: str = "", dimension: int = 0) -> JSONResponse:
+    crawl = database.get_crawl(crawl_id)
+    if not crawl or crawl["status"] != "completed":
+        raise HTTPException(404, "A completed crawl is required to re-embed knowledge.")
+    try:
+        result = _reembed_knowledge(crawl_id, provider=provider, model=model, dimension=dimension)
+        return JSONResponse(result)
+    except Exception as exc:
+        raise HTTPException(500, f"Knowledge re-embedding failed: {type(exc).__name__}: {exc}")
 
 
 @app.get("/crawls/{crawl_id}/knowledge/compare/{baseline_id}", response_class=HTMLResponse)

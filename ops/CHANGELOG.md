@@ -4,12 +4,12 @@ All notable changes, phase executions, and architectural transitions for Local S
 
 ---
 
-## Current Status: Phase 0, Phase 1, Phase 2 Complete (2A-2G Certified) / Ready for Phase 2H
+## Current Status: Phase 0, Phase 1, Phase 2 Complete (2A-2G.1 Certified) / Ready for Phase 2H
 
 ### Current Phase State:
 - **PHASE 0 (Baseline & Forensic Audit)**: COMPLETED / PASSED
 - **PHASE 1 (Evaluation Integrity)**: COMPLETED / PASSED
-- **PHASE 2 (Crawler Core)**: ACTIVE / SUBPHASES 2A-2G CERTIFIED
+- **PHASE 2 (Crawler Core)**: ACTIVE / SUBPHASES 2A-2G.1 CERTIFIED
   - **Subphase 2A (Contracts & State Model)**: COMPLETED / PASSED
   - **Subphase 2B (URL Normalization + Frontier + Crawl Lifecycle)**: COMPLETED / PASSED
   - **Subphase 2C (Four Independent Concurrency Engines)**: COMPLETED / PASSED & CERTIFIED
@@ -17,6 +17,7 @@ All notable changes, phase executions, and architectural transitions for Local S
   - **Subphase 2E (Static Fetch + Playwright + Smart Escalation)**: COMPLETED / PASSED & CERTIFIED
   - **Subphase 2F (Robots, Politeness, Retries & Crawl Budgets)**: COMPLETED / PASSED & CERTIFIED
   - **Subphase 2G (Resume, Recovery, Crash Safety & Embedding Auto-Fallback)**: COMPLETED / PASSED & CERTIFIED
+  - **Subphase 2G.1 (Hosted Embedding Provider Architecture & Re-Embedding)**: COMPLETED / PASSED & CERTIFIED
 - **Subphase 2H (SSRF Defense, Security & Allowed Hosts Enforcement)**: READY TO BEGIN
 - **PHASE 3 (Universal Extraction)**: PENDING
 - **PHASE 4 (Knowledge/Indexing/Search)**: PENDING
@@ -24,6 +25,34 @@ All notable changes, phase executions, and architectural transitions for Local S
 - **PHASE 6 (Web Intelligence)**: PENDING
 - **PHASE 7 (UI/UX)**: PENDING
 - **PHASE 8 (Final Certification)**: PENDING
+
+---
+
+## [Phase 2G.1: Hosted Embedding Provider Architecture] - 2026-09-06
+
+### Added
+- **`app/embeddings.py` Overhaul**:
+  - Implemented provider-independent `EmbeddingProvider` Protocol with `embed(text, task_type)`, `embed_batch(texts, task_type)`, and `get_metadata()`.
+  - Created `GeminiEmbeddingProvider` supporting Google Gemini REST API (`batchEmbedContents`), model configurability (default `text-embedding-004`), dimension customizability (default 768), secure `x-goog-api-key` header authentication, exponential retry backoff with jitter (0.8-1.2) and `Retry-After` adherence, fail-closed handling for HTTP 401/403 and 404, and bounded sub-batch chunking ($\le 100$).
+  - Created `HashEmbeddingProvider` providing deterministic 384-dimensional Blake2b feature hashing for offline unit testing, zero-cost CI, and graceful fallback.
+  - Created `SentenceTransformersProvider` wrapping local Hugging Face neural models with clean error isolation if optional dependencies are missing.
+  - Created `NullEmbeddingProvider` enabling zero-vector BM25-only operation.
+  - Implemented `ProviderHealth` categorization (`AVAILABLE`, `UNAVAILABLE`, `RATE_LIMITED`, `AUTHENTICATION_FAILED`, `TEMPORARY_FAILURE`, `MISCONFIGURED`, `UNVERIFIED_LIVE`).
+  - Implemented `FallbackPolicy` modes (`FAIL_CLOSED`, `FALLBACK_TO_HASH`, `BM25_ONLY`, `AUTO`) with full diagnostic resolution tracking (`requested_provider`, `actual_provider`, `fallback_occurred`, `fallback_reason`, `degraded_mode`).
+  - Implemented `resolve_embedding_provider(...)` and `build_embedding_provider(...)`.
+  - Implemented `cosine_similarity(vec_a, vec_b)` with dimension matching validation.
+- **Database Multi-Generation Vector Storage & Re-Embedding (`app/database.py`)**:
+  - Added schema migration adding `model`, `dimension`, `created_at`, `content_hash`, and `metadata_json` to SQLite `vector_embeddings`.
+  - Implemented `reembed_knowledge(crawl_id, embedder)` allowing seamless vector upgrades across existing crawled chunks without recrawling or mutating `pages` or `links`.
+  - Implemented `get_vector_embeddings_metadata(crawl_id)`.
+  - Hardened `search_hybrid_knowledge` to filter on `v.provider = ? AND (v.model = ? OR ? = '' OR v.model = '') AND v.dimension = ?`, strictly preventing cross-model or cross-dimension vector corruption.
+- **API & Configuration Integration (`app/config.py`, `app/main.py`)**:
+  - Added `gemini_api_key`, `embedding_fallback_policy`, `embedding_batch_size`, and `embedding_timeout_seconds` to `Settings`.
+  - Pre-flight Gemini API key detection defaulting to `text-embedding-004` (768 dim).
+  - Added POST `/crawls/{crawl_id}/knowledge/reembed` endpoint with background execution and forensic logging.
+- **Test Suite (`tests/test_hosted_embeddings.py`)**:
+  - 17 comprehensive test cases: single/batch embedding, sub-batch chunking, 401/403 fail-closed, 404 model validation, 429 rate limit with `Retry-After`, timeout retries, secret key redaction, fallback policy compliance, auto-resolution with/without keys, database vector metadata persistence, model re-embedding without recrawling, dimension mismatch prevention, and live smoke test.
+- Recorded **ADR-016** in `DECISIONS.md` and Section 9 in `TEST_MATRIX.md`.
 
 ---
 
