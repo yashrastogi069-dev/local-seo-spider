@@ -148,4 +148,15 @@ This document provides a detailed inventory of all 343 automated unit, integrati
 - Clean batching bounds (batch size $\le 100$).
 - Conditional live smoke testing: live verification when `GEMINI_API_KEY` is present, marked `UNVERIFIED LIVE` in offline/mocked environments.
 
-
+### 10. Pipeline Decoupling, Fault Isolation & Re-Indexing Suite (Phase 2G.2)
+- Independent 7-stage lifecycle tracking (`CRAWL`, `STORAGE`, `EXTRACTION`, `CHUNKING`, `EMBEDDING`, `INDEXING`, `RAG`) in SQLite `pipeline_stage_records`.
+- Explicit stage status states: `NOT_STARTED`, `RUNNING`, `SUCCESS`, `PARTIAL`, `FAILED`, `PENDING_RETRY`, `SKIPPED`.
+- 100% crawl data durability: raw crawled pages, links, and issues remain byte-for-byte intact across all embedding and indexing failure modes.
+- Lexical chunking persistence priority: `knowledge_chunks` and `knowledge_fts` are committed to database before vector embedding begins; lexical retrieval remains operational during embedding failures.
+- Fault isolation & partial indexing: provider failures midway through batch processing leave successful vectors intact and log failed chunks to `failed_embedding_chunks` with `retryable=True`.
+- Rate limit (429) classification: HTTP 429 and transient provider errors are classified as retryable.
+- Content hashing deduplication: chunks with unchanged `content_hash` and matching `(provider, model, dimension)` skip embedding calls.
+- Model change detection: `detect_embedding_generation_mismatch` identifies provider, model, or dimension changes and forces clean re-indexing without silent mixing.
+- Granular retry workflow: `retry_failed_embeddings` queries and embeds only failed chunks, transitions stages to `SUCCESS`, and avoids recrawling or re-embedding successful chunks.
+- Provider naming harmony & state propagation: `embedder.name` and `provider_type` cross-compatibility across vector queries and generation mismatch detection; `PipelineStage.RAG` propagated to `SUCCESS` on retry resolution with crawl pause reason cleared; stale ghost chunks pruned when chunk counts shrink.
+- Observability endpoints: `GET /crawls/{crawl_id}/pipeline` (forensic status and model mismatch analysis), `POST /crawls/{crawl_id}/pipeline/retry-embedding` (targeted retry), and `POST /crawls/{crawl_id}/reembed`.

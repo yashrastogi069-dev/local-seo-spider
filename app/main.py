@@ -8,7 +8,7 @@ import threading
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ from app.answering import LocalAnswerer
 from app.database import Database, now
 from app.embeddings import EmbeddingProvider, build_embedding_provider, resolve_embedding_provider
 from app.exports import write_csv_exports, write_html_report, write_json_exports
-from app.types import CrawlRequest
+from app.types import CrawlRequest, PipelineStage, StageStatus
 from app.urltools import UrlValidationError, is_same_host, normalize_url, visible_url
 from app.workflows import WorkflowDefinition, WorkflowEngine, trigger_matches, workflow_json
 
@@ -144,23 +144,91 @@ def _parse_request(start_url: str, mode: str, url_list: str, max_urls: str, dela
 def _run_claimed_crawl(crawl_id: str, crawl_request: CrawlRequest) -> None:
     """Run a job already claimed by the sole local worker and persist its outcome."""
     database.update_crawl(crawl_id, robots_status="checking")
+    database.update_pipeline_stage(crawl_id, PipelineStage.CRAWL, StageStatus.RUNNING, started_at=now())
+
     def progress(pages_crawled: int, _: int, robots_status: str) -> None:
         database.update_crawl(crawl_id, pages_crawled=pages_crawled, robots_status=robots_status)
+
     try:
         pages, links, robots_status = CrawlEngine(settings).run(crawl_request, progress)
+        database.update_pipeline_stage(
+            crawl_id,
+            PipelineStage.CRAWL,
+            StageStatus.SUCCESS,
+            total_items=len(pages),
+            successful_items=len(pages),
+            completed_at=now(),
+        )
+
+        database.update_pipeline_stage(crawl_id, PipelineStage.STORAGE, StageStatus.RUNNING, started_at=now())
         issues = analyze_pages(pages, links, crawl_request.start_url)
         database.replace_pages_and_links(crawl_id, pages, links)
         database.replace_issues(crawl_id, issues)
+        database.update_pipeline_stage(
+            crawl_id,
+            PipelineStage.STORAGE,
+            StageStatus.SUCCESS,
+            total_items=len(pages) + len(links),
+            successful_items=len(pages) + len(links),
+            completed_at=now(),
+        )
+
         # Fetch completion is durable and should not be blocked by a first-time model download.
-        database.update_crawl(crawl_id, status="completed", completed_at=now(), robots_status=robots_status, pages_crawled=len(pages), issues_found=len(issues), pause_reason="Indexing knowledge locally…")
+        database.update_crawl(
+            crawl_id,
+            status="completed",
+            completed_at=now(),
+            robots_status=robots_status,
+            pages_crawled=len(pages),
+            issues_found=len(issues),
+            pause_reason="Indexing knowledge locally…",
+        )
+
         try:
             stored_pages = database.get_pages(crawl_id)
-            database.replace_knowledge_chunks(crawl_id, extract_pages_knowledge(stored_pages, crawl_id), _embedding_provider(settings.embedding_provider, settings.embedding_model, settings.embedding_dimension))
-            database.update_crawl(crawl_id, pause_reason="")
+            database.update_pipeline_stage(
+                crawl_id,
+                PipelineStage.EXTRACTION,
+                StageStatus.RUNNING,
+                started_at=now(),
+                total_items=len(stored_pages),
+            )
+            chunks = extract_pages_knowledge(stored_pages, crawl_id)
+            database.update_pipeline_stage(
+                crawl_id,
+                PipelineStage.EXTRACTION,
+                StageStatus.SUCCESS,
+                total_items=len(stored_pages),
+                successful_items=len(stored_pages),
+                completed_at=now(),
+            )
+
+            embedder = _embedding_provider(
+                settings.embedding_provider,
+                settings.embedding_model,
+                settings.embedding_dimension,
+            )
+            index_res = database.index_knowledge_pipeline(crawl_id, chunks, embedder)
+
+            if index_res.get("status") == StageStatus.SUCCESS.value:
+                database.update_crawl(crawl_id, pause_reason="")
+                database.update_pipeline_stage(crawl_id, PipelineStage.RAG, StageStatus.SUCCESS, completed_at=now(), metadata={"ready": True})
+            elif index_res.get("status") == StageStatus.PARTIAL.value:
+                database.update_crawl(crawl_id, pause_reason=f"Knowledge indexing partial: {index_res.get('error_message', '')}")
+                database.update_pipeline_stage(crawl_id, PipelineStage.RAG, StageStatus.PARTIAL, error_message="Degraded to lexical-first due to partial embedding index", metadata={"ready": True, "degraded": True})
+            elif index_res.get("status") == StageStatus.FAILED.value:
+                database.update_crawl(crawl_id, pause_reason=f"Knowledge indexing failed: {index_res.get('error_message', '')}")
+                database.update_pipeline_stage(crawl_id, PipelineStage.RAG, StageStatus.PARTIAL, error_message="Operating in lexical-only mode due to failed vector embedding", metadata={"ready": True, "lexical_only": True})
+            elif index_res.get("status") == StageStatus.SKIPPED.value:
+                database.update_crawl(crawl_id, pause_reason="")
+                database.update_pipeline_stage(crawl_id, PipelineStage.RAG, StageStatus.SUCCESS, completed_at=now(), metadata={"ready": True, "lexical_only": True})
         except Exception as index_exc:
             database.update_crawl(crawl_id, pause_reason=f"Knowledge indexing pending: {type(index_exc).__name__}: {index_exc}")
+            database.update_pipeline_stage(crawl_id, PipelineStage.INDEXING, StageStatus.FAILED, error_message=str(index_exc), completed_at=now())
+
         _fire_crawl_completed_workflows(crawl_id, crawl_request.start_url)
     except Exception as exc:
+        database.update_pipeline_stage(crawl_id, PipelineStage.CRAWL, StageStatus.FAILED, error_message=str(exc), completed_at=now())
         database.defer_or_pause_job(crawl_id, f"{type(exc).__name__}: {exc}")
 
 
@@ -386,6 +454,52 @@ def reembed_knowledge_endpoint(request: Request, crawl_id: str, provider: str = 
         return JSONResponse(result)
     except Exception as exc:
         raise HTTPException(500, f"Knowledge re-embedding failed: {type(exc).__name__}: {exc}")
+
+
+@app.get("/crawls/{crawl_id}/pipeline")
+def crawl_pipeline(crawl_id: str) -> dict[str, Any]:
+    crawl = database.get_crawl(crawl_id)
+    if not crawl:
+        raise HTTPException(404, "Crawl was not found.")
+    pipeline = database.get_pipeline_status(crawl_id)
+    embedder = _embedding_provider(settings.embedding_provider, settings.embedding_model, settings.embedding_dimension)
+    pipeline["model_mismatch"] = database.detect_embedding_generation_mismatch(crawl_id, embedder)
+    return pipeline
+
+
+@app.post("/crawls/{crawl_id}/pipeline/retry-embedding")
+def retry_crawl_embedding(crawl_id: str) -> dict[str, Any]:
+    crawl = database.get_crawl(crawl_id)
+    if not crawl:
+        raise HTTPException(404, "Crawl was not found.")
+    if crawl["status"] not in ("completed", "partial"):
+        raise HTTPException(400, "Crawl must be completed or partial to retry embedding.")
+    embedder = _embedding_provider(settings.embedding_provider, settings.embedding_model, settings.embedding_dimension)
+    result = database.retry_failed_embeddings(crawl_id, embedder)
+    result["pipeline"] = database.get_pipeline_status(crawl_id)
+    return result
+
+
+@app.post("/crawls/{crawl_id}/reembed")
+def reembed_crawl(
+    crawl_id: str,
+    provider: str = "",
+    model: str = "",
+    dimension: int = 0,
+) -> dict[str, Any]:
+    crawl = database.get_crawl(crawl_id)
+    if not crawl:
+        raise HTTPException(404, "Crawl was not found.")
+    if crawl["status"] != "completed":
+        raise HTTPException(400, "Crawl must be completed to reembed.")
+    prov_name = provider or settings.embedding_provider
+    mod_name = model or settings.embedding_model
+    dim = dimension or settings.embedding_dimension
+    embedder = _embedding_provider(prov_name, mod_name, dim)
+    result = database.reembed_knowledge(crawl_id, embedder)
+    result["pipeline"] = database.get_pipeline_status(crawl_id)
+    return result
+
 
 
 @app.get("/crawls/{crawl_id}/knowledge/compare/{baseline_id}", response_class=HTMLResponse)

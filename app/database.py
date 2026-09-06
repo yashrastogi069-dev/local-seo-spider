@@ -21,7 +21,10 @@ from app.types import (
     IssueRecord,
     LinkRecord,
     PageRecord,
+    PipelineStage,
     ResumableCrawlError,
+    StageRecord,
+    StageStatus,
 )
 
 CURRENT_SCHEMA_VERSION: int = 1
@@ -178,6 +181,7 @@ class Database:
             self._ensure_page_columns(conn)
             self._ensure_knowledge_columns(conn)
             self._ensure_vector_columns(conn)
+            self._ensure_pipeline_stage_tables(conn)
 
     @staticmethod
     def _ensure_page_columns(conn: sqlite3.Connection) -> None:
@@ -264,6 +268,52 @@ class Database:
             if name not in existing:
                 conn.execute(f"ALTER TABLE vector_embeddings ADD COLUMN {name} {definition}")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_vectors_crawl_provider_dim ON vector_embeddings(crawl_id, provider, dimension)")
+
+    @staticmethod
+    def _ensure_pipeline_stage_tables(conn: sqlite3.Connection) -> None:
+        """Ensure pipeline stages and failed chunks tracking tables exist."""
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS pipeline_stage_records (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 crawl_id TEXT NOT NULL REFERENCES crawls(id) ON DELETE CASCADE,
+                 stage TEXT NOT NULL,
+                 status TEXT NOT NULL,
+                 started_at TEXT NOT NULL DEFAULT '',
+                 completed_at TEXT NOT NULL DEFAULT '',
+                 provider TEXT NOT NULL DEFAULT '',
+                 model TEXT NOT NULL DEFAULT '',
+                 dimension INTEGER NOT NULL DEFAULT 0,
+                 total_items INTEGER NOT NULL DEFAULT 0,
+                 successful_items INTEGER NOT NULL DEFAULT 0,
+                 failed_items INTEGER NOT NULL DEFAULT 0,
+                 pending_items INTEGER NOT NULL DEFAULT 0,
+                 error_message TEXT NOT NULL DEFAULT '',
+                 retryable INTEGER NOT NULL DEFAULT 0,
+                 metadata_json TEXT NOT NULL DEFAULT '{}',
+                 UNIQUE(crawl_id, stage)
+               )"""
+        )
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_pipeline_stages_crawl ON pipeline_stage_records(crawl_id, stage)"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS failed_embedding_chunks (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 crawl_id TEXT NOT NULL REFERENCES crawls(id) ON DELETE CASCADE,
+                 chunk_id INTEGER NOT NULL REFERENCES knowledge_chunks(id) ON DELETE CASCADE,
+                 provider TEXT NOT NULL,
+                 model TEXT NOT NULL,
+                 dimension INTEGER NOT NULL DEFAULT 0,
+                 attempt_count INTEGER NOT NULL DEFAULT 1,
+                 last_error TEXT NOT NULL DEFAULT '',
+                 retryable INTEGER NOT NULL DEFAULT 1,
+                 failed_at TEXT NOT NULL DEFAULT '',
+                 UNIQUE(crawl_id, chunk_id, provider, model)
+               )"""
+        )
+        conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_failed_chunks_crawl ON failed_embedding_chunks(crawl_id, provider, model)"""
+        )
 
     def create_crawl(self, request: CrawlRequest) -> str:
         crawl_id = request.crawl_id or str(uuid4())
@@ -498,67 +548,646 @@ class Database:
                 [(crawl_id, issue.rule_key, issue.severity, issue.title, issue.url, issue.evidence, issue.remediation, issue.fingerprint) for issue in issues],
             )
 
-    def replace_knowledge_chunks(self, crawl_id: str, chunks: Iterable[KnowledgeChunk], embedder: EmbeddingProvider | None = None) -> None:
-        """Replace one crawl's local lexical and vector indexes atomically."""
-        materialized = list(chunks)
-        active_embedder = embedder or HashEmbeddingProvider()
-        active_model = getattr(active_embedder, "model_name", active_embedder.name)
-        active_prov = getattr(active_embedder, "provider_type", active_embedder.name)
-        now_ts = now()
+    def update_pipeline_stage(
+        self,
+        crawl_id: str,
+        stage: PipelineStage | str,
+        status: StageStatus | str,
+        *,
+        started_at: str = "",
+        completed_at: str = "",
+        provider: str = "",
+        model: str = "",
+        dimension: int = 0,
+        total_items: int = -1,
+        successful_items: int = -1,
+        failed_items: int = -1,
+        pending_items: int = -1,
+        error_message: str = "",
+        retryable: bool = False,
+        metadata: dict[str, Any] | None = None,
+    ) -> StageRecord:
+        """Upsert a pipeline stage record with forensic status and counters."""
+        stage_name = stage.value if isinstance(stage, PipelineStage) else str(stage)
+        status_name = status.value if isinstance(status, StageStatus) else str(status)
+        meta_json = json.dumps(metadata or {})
+        init_total = max(0, total_items)
+        init_success = max(0, successful_items)
+        init_failed = max(0, failed_items)
+        init_pending = max(0, pending_items)
 
         with self.connect() as conn:
-            conn.execute("DELETE FROM knowledge_fts WHERE crawl_id = ?", (crawl_id,))
-            conn.execute("DELETE FROM vector_embeddings WHERE crawl_id = ?", (crawl_id,))
-            conn.execute("DELETE FROM knowledge_chunks WHERE crawl_id = ?", (crawl_id,))
+            conn.execute(
+                """INSERT INTO pipeline_stage_records (
+                       crawl_id, stage, status, started_at, completed_at, provider, model, dimension,
+                       total_items, successful_items, failed_items, pending_items, error_message, retryable, metadata_json
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(crawl_id, stage) DO UPDATE SET
+                       status=excluded.status,
+                       started_at=CASE WHEN excluded.started_at != '' THEN excluded.started_at ELSE pipeline_stage_records.started_at END,
+                       completed_at=CASE WHEN excluded.completed_at != '' THEN excluded.completed_at ELSE pipeline_stage_records.completed_at END,
+                       provider=CASE WHEN excluded.provider != '' THEN excluded.provider ELSE pipeline_stage_records.provider END,
+                       model=CASE WHEN excluded.model != '' THEN excluded.model ELSE pipeline_stage_records.model END,
+                       dimension=CASE WHEN excluded.dimension > 0 THEN excluded.dimension ELSE pipeline_stage_records.dimension END,
+                       total_items=CASE WHEN excluded.total_items >= 0 THEN excluded.total_items ELSE pipeline_stage_records.total_items END,
+                       successful_items=CASE WHEN excluded.successful_items >= 0 THEN excluded.successful_items ELSE pipeline_stage_records.successful_items END,
+                       failed_items=CASE WHEN excluded.failed_items >= 0 THEN excluded.failed_items ELSE pipeline_stage_records.failed_items END,
+                       pending_items=CASE WHEN excluded.pending_items >= 0 THEN excluded.pending_items ELSE pipeline_stage_records.pending_items END,
+                       error_message=excluded.error_message,
+                       retryable=excluded.retryable,
+                       metadata_json=CASE WHEN excluded.metadata_json != '{}' THEN excluded.metadata_json ELSE pipeline_stage_records.metadata_json END""",
+                (
+                    crawl_id, stage_name, status_name, started_at, completed_at, provider, model, dimension,
+                    init_total if total_items >= 0 else -1,
+                    init_success if successful_items >= 0 else -1,
+                    init_failed if failed_items >= 0 else -1,
+                    init_pending if pending_items >= 0 else -1,
+                    error_message, int(retryable), meta_json,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM pipeline_stage_records WHERE crawl_id = ? AND stage = ?",
+                (crawl_id, stage_name),
+            ).fetchone()
 
-            chunk_meta = []
-            for chunk in materialized:
-                cursor = conn.execute(
-                    """INSERT INTO knowledge_chunks (
-                           page_id, crawl_id, url, canonical_url, title, section, heading_path,
-                           heading_path_json, content_type, source_type, crawl_timestamp,
-                           parent_url, depth, content_hash, content, chunk_index
-                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    chunk.as_row(),
-                )
-                chunk_id = cursor.lastrowid
+        row_dict = dict(row)
+        return StageRecord(
+            stage=row_dict["stage"],
+            status=row_dict["status"],
+            started_at=row_dict["started_at"],
+            completed_at=row_dict["completed_at"],
+            provider=row_dict["provider"],
+            model=row_dict["model"],
+            dimension=int(row_dict["dimension"]),
+            total_items=int(row_dict["total_items"]),
+            successful_items=int(row_dict["successful_items"]),
+            failed_items=int(row_dict["failed_items"]),
+            pending_items=int(row_dict["pending_items"]),
+            error_message=row_dict["error_message"],
+            retryable=bool(row_dict["retryable"]),
+            metadata=json.loads(row_dict["metadata_json"] or "{}"),
+        )
+
+    def get_pipeline_stage(self, crawl_id: str, stage: PipelineStage | str) -> dict[str, Any] | None:
+        """Get the forensic status record for a single pipeline stage."""
+        stage_name = stage.value if isinstance(stage, PipelineStage) else str(stage)
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM pipeline_stage_records WHERE crawl_id = ? AND stage = ?",
+                (crawl_id, stage_name),
+            ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["retryable"] = bool(d["retryable"])
+        d["metadata"] = json.loads(d.pop("metadata_json", "{}") or "{}")
+        return d
+
+    def get_pipeline_status(self, crawl_id: str) -> dict[str, Any]:
+        """Get the full decoupled pipeline status across all 7 stages."""
+        standard_stages = [
+            PipelineStage.CRAWL.value,
+            PipelineStage.STORAGE.value,
+            PipelineStage.EXTRACTION.value,
+            PipelineStage.CHUNKING.value,
+            PipelineStage.EMBEDDING.value,
+            PipelineStage.INDEXING.value,
+            PipelineStage.RAG.value,
+        ]
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM pipeline_stage_records WHERE crawl_id = ?",
+                (crawl_id,),
+            ).fetchall()
+            failed_row = conn.execute(
+                "SELECT COUNT(*) as count FROM failed_embedding_chunks WHERE crawl_id = ?",
+                (crawl_id,),
+            ).fetchone()
+            crawl_row = conn.execute(
+                "SELECT status, error_message, pause_reason FROM crawls WHERE id = ?",
+                (crawl_id,),
+            ).fetchone()
+
+        failed_chunks_count = int(failed_row["count"]) if failed_row else 0
+        stages_by_name: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            d = dict(r)
+            d["retryable"] = bool(d["retryable"])
+            d["metadata"] = json.loads(d.pop("metadata_json", "{}") or "{}")
+            stages_by_name[d["stage"]] = d
+
+        complete_stages: dict[str, dict[str, Any]] = {}
+        for st in standard_stages:
+            if st in stages_by_name:
+                complete_stages[st] = stages_by_name[st]
+            else:
+                complete_stages[st] = StageRecord(stage=st, status=StageStatus.NOT_STARTED.value).to_dict()
+
+        overall_status = "unknown"
+        if crawl_row:
+            overall_status = crawl_row["status"]
+
+        return {
+            "crawl_id": crawl_id,
+            "overall_status": overall_status,
+            "stages": complete_stages,
+            "failed_chunks_count": failed_chunks_count,
+        }
+
+    def detect_embedding_generation_mismatch(self, crawl_id: str, embedder: EmbeddingProvider) -> dict[str, Any]:
+        """Detect if the configured embedding provider/model/dimension differs from indexed vectors."""
+        active_model = getattr(embedder, "model_name", embedder.name)
+        active_prov = getattr(embedder, "name", "hash")
+        active_dim = getattr(embedder, "dimension", 0)
+
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT provider, model, dimension, COUNT(*) as count
+                   FROM vector_embeddings WHERE crawl_id = ?
+                   GROUP BY provider, model, dimension""",
+                (crawl_id,),
+            ).fetchall()
+
+        if not rows:
+            return {
+                "mismatch": False,
+                "has_existing_embeddings": False,
+                "requires_reindex": False,
+                "requested": {"provider": active_prov, "model": active_model, "dimension": active_dim},
+                "generations": [],
+            }
+
+        generations = [dict(r) for r in rows]
+        exact_match = any(
+            (r["provider"] == active_prov or r["provider"] == embedder.name)
+            and (r["model"] == active_model or not r["model"])
+            and r["dimension"] == active_dim
+            for r in rows
+        )
+        primary = rows[0]
+        mismatch = not exact_match
+        return {
+            "mismatch": mismatch,
+            "has_existing_embeddings": True,
+            "requires_reindex": mismatch,
+            "existing": {
+                "provider": primary["provider"],
+                "model": primary["model"],
+                "dimension": primary["dimension"],
+                "chunk_count": primary["count"],
+            },
+            "requested": {
+                "provider": active_prov,
+                "model": active_model,
+                "dimension": active_dim,
+            },
+            "generations": generations,
+        }
+
+    def index_knowledge_pipeline(
+        self,
+        crawl_id: str,
+        chunks: Iterable[KnowledgeChunk],
+        embedder: EmbeddingProvider | None = None,
+        force_reembed: bool = False,
+    ) -> dict[str, Any]:
+        """Decoupled knowledge indexing pipeline: Lexical commit first, then vector embedding with partial fault isolation."""
+        materialized = list(chunks)
+        total_chunks = len(materialized)
+        now_ts = now()
+
+        # Step 1: Record Extraction Stage as SUCCESS if not already recorded
+        extraction_record = self.get_pipeline_stage(crawl_id, PipelineStage.EXTRACTION)
+        if not extraction_record or extraction_record.get("status") != StageStatus.SUCCESS.value:
+            self.update_pipeline_stage(
+                crawl_id,
+                PipelineStage.EXTRACTION,
+                StageStatus.SUCCESS,
+                total_items=total_chunks,
+                successful_items=total_chunks,
+                completed_at=now_ts,
+            )
+
+        # Step 2: Durable Lexical Chunking Persistence (Atomic transaction, independent of embeddings)
+        self.update_pipeline_stage(
+            crawl_id,
+            PipelineStage.CHUNKING,
+            StageStatus.RUNNING,
+            started_at=now_ts,
+            total_items=total_chunks,
+        )
+
+        try:
+            with self.connect() as conn:
+                if force_reembed or not self.get_vector_embeddings_metadata(crawl_id):
+                    conn.execute("DELETE FROM vector_embeddings WHERE crawl_id = ?", (crawl_id,))
+                    conn.execute("DELETE FROM failed_embedding_chunks WHERE crawl_id = ?", (crawl_id,))
+
+                for chunk in materialized:
+                    conn.execute(
+                        """INSERT INTO knowledge_chunks (
+                               page_id, crawl_id, url, canonical_url, title, section, heading_path,
+                               heading_path_json, content_type, source_type, crawl_timestamp,
+                               parent_url, depth, content_hash, content, chunk_index
+                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(crawl_id, page_id, chunk_index) DO UPDATE SET
+                               url=excluded.url, canonical_url=excluded.canonical_url, title=excluded.title,
+                               section=excluded.section, heading_path=excluded.heading_path,
+                               heading_path_json=excluded.heading_path_json, content_type=excluded.content_type,
+                               source_type=excluded.source_type, crawl_timestamp=excluded.crawl_timestamp,
+                               parent_url=excluded.parent_url, depth=excluded.depth, content_hash=excluded.content_hash,
+                               content=excluded.content""",
+                        chunk.as_row(),
+                    )
+
+                active_keys = {(c.page_id, c.chunk_index) for c in materialized}
+                existing_chunks = conn.execute(
+                    "SELECT id, page_id, chunk_index FROM knowledge_chunks WHERE crawl_id = ?",
+                    (crawl_id,),
+                ).fetchall()
+                stale_ids = [r["id"] for r in existing_chunks if (r["page_id"], r["chunk_index"]) not in active_keys]
+                if stale_ids:
+                    stale_ph = ",".join("?" for _ in stale_ids)
+                    conn.execute(f"DELETE FROM knowledge_chunks WHERE id IN ({stale_ph})", stale_ids)
+                    conn.execute(f"DELETE FROM vector_embeddings WHERE chunk_id IN ({stale_ph})", stale_ids)
+                    conn.execute(f"DELETE FROM failed_embedding_chunks WHERE chunk_id IN ({stale_ph})", stale_ids)
+
+                conn.execute("DELETE FROM knowledge_fts WHERE crawl_id = ?", (crawl_id,))
                 conn.execute(
                     """INSERT INTO knowledge_fts (chunk_id, crawl_id, url, title, heading_path, content)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (chunk_id, crawl_id, chunk.url, chunk.title, chunk.heading_path, chunk.content),
+                       SELECT id, crawl_id, url, title, heading_path, content FROM knowledge_chunks WHERE crawl_id = ?""",
+                    (crawl_id,),
                 )
-                chunk_meta.append((chunk_id, chunk.content, chunk.content_hash))
 
-            if chunk_meta and getattr(active_embedder, "dimension", 0) > 0:
-                texts = [item[1] for item in chunk_meta]
-                try:
-                    embeddings = active_embedder.embed_batch(texts, task_type="RETRIEVAL_DOCUMENT")
-                except Exception:
-                    embeddings = [active_embedder.embed(t, task_type="RETRIEVAL_DOCUMENT") for t in texts]
+            self.update_pipeline_stage(
+                crawl_id,
+                PipelineStage.CHUNKING,
+                StageStatus.SUCCESS,
+                total_items=total_chunks,
+                successful_items=total_chunks,
+                completed_at=now(),
+            )
+        except Exception as chunk_exc:
+            self.update_pipeline_stage(
+                crawl_id,
+                PipelineStage.CHUNKING,
+                StageStatus.FAILED,
+                total_items=total_chunks,
+                error_message=f"{type(chunk_exc).__name__}: {chunk_exc}",
+                completed_at=now(),
+            )
+            raise
 
+        # Step 3: Embeddings & Vector Indexing Stage
+        active_embedder = embedder or HashEmbeddingProvider()
+        active_model = getattr(active_embedder, "model_name", active_embedder.name)
+        active_prov = getattr(active_embedder, "name", "hash")
+        active_dim = getattr(active_embedder, "dimension", 0)
+
+        if total_chunks == 0:
+            self.update_pipeline_stage(
+                crawl_id, PipelineStage.EMBEDDING, StageStatus.SUCCESS,
+                provider=active_prov, model=active_model, dimension=active_dim,
+                total_items=0, successful_items=0, completed_at=now(),
+            )
+            self.update_pipeline_stage(
+                crawl_id, PipelineStage.INDEXING, StageStatus.SUCCESS,
+                provider=active_prov, model=active_model, dimension=active_dim,
+                total_items=0, successful_items=0, completed_at=now(),
+            )
+            return {"chunks_embedded": 0, "status": "success", "provider": active_prov, "model": active_model}
+
+        if active_dim <= 0:
+            self.update_pipeline_stage(
+                crawl_id, PipelineStage.EMBEDDING, StageStatus.SKIPPED,
+                provider=active_prov, model=active_model, dimension=0,
+                total_items=total_chunks, error_message="Dimension is 0; embedding skipped.",
+                completed_at=now(),
+            )
+            self.update_pipeline_stage(
+                crawl_id, PipelineStage.INDEXING, StageStatus.SUCCESS,
+                provider=active_prov, model=active_model, dimension=0,
+                total_items=total_chunks, successful_items=total_chunks,
+                metadata={"lexical_only": True},
+                completed_at=now(),
+            )
+            return {"chunks_embedded": 0, "status": "skipped", "provider": active_prov, "model": active_model}
+
+        self.update_pipeline_stage(
+            crawl_id, PipelineStage.EMBEDDING, StageStatus.RUNNING,
+            provider=active_prov, model=active_model, dimension=active_dim,
+            total_items=total_chunks, started_at=now(),
+        )
+        self.update_pipeline_stage(
+            crawl_id, PipelineStage.INDEXING, StageStatus.RUNNING,
+            provider=active_prov, model=active_model, dimension=active_dim,
+            total_items=total_chunks, started_at=now(),
+        )
+
+        with self.connect() as conn:
+            stored_rows = conn.execute(
+                "SELECT id, content, content_hash FROM knowledge_chunks WHERE crawl_id = ? ORDER BY id",
+                (crawl_id,),
+            ).fetchall()
+            existing_vec_rows = conn.execute(
+                """SELECT chunk_id, content_hash FROM vector_embeddings
+                   WHERE crawl_id = ? AND (provider = ? OR provider = ?) AND (model = ? OR ? = '' OR model = '') AND dimension = ?""",
+                (crawl_id, active_prov, active_embedder.name, active_model, active_model, active_dim),
+            ).fetchall()
+
+        existing_hashes = {r["chunk_id"]: r["content_hash"] for r in existing_vec_rows}
+
+        # Content Hashing Skip Logic:
+        # If content_hash is unchanged and model/provider/dimension matches, skip embedding!
+        chunks_to_embed = []
+        skipped_count = 0
+        for r in stored_rows:
+            c_id = r["id"]
+            c_hash = r["content_hash"]
+            if not force_reembed and c_id in existing_hashes and existing_hashes[c_id] == c_hash:
+                skipped_count += 1
+            else:
+                chunks_to_embed.append(r)
+
+        successful_count = skipped_count
+        failed_count = 0
+        last_error = ""
+        is_retryable = False
+
+        batch_size = max(1, getattr(active_embedder, "batch_size", 100))
+        for i in range(0, len(chunks_to_embed), batch_size):
+            batch = chunks_to_embed[i : i + batch_size]
+            texts = [item["content"] for item in batch]
+            try:
+                embeddings = active_embedder.embed_batch(texts, task_type="RETRIEVAL_DOCUMENT")
                 vector_rows = []
-                for (c_id, _, c_hash), vec in zip(chunk_meta, embeddings):
+                batch_now = now()
+                for item, vec in zip(batch, embeddings):
                     if vec:
                         emb_arr = array("f", vec)
                         meta_dict = {
                             "provider": active_prov,
                             "model": active_model,
                             "dimension": len(emb_arr),
-                            "created_at": now_ts,
+                            "created_at": batch_now,
                             "task_type": "RETRIEVAL_DOCUMENT",
                         }
                         vector_rows.append((
-                            c_id, crawl_id, active_embedder.name, active_model,
-                            len(emb_arr), emb_arr.tobytes(), now_ts, c_hash, json.dumps(meta_dict)
+                            item["id"], crawl_id, active_prov, active_model,
+                            len(emb_arr), emb_arr.tobytes(), batch_now, item["content_hash"], json.dumps(meta_dict)
                         ))
 
                 if vector_rows:
-                    conn.executemany(
-                        """INSERT OR REPLACE INTO vector_embeddings (
-                               chunk_id, crawl_id, provider, model, dimension, embedding, created_at, content_hash, metadata_json
-                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        vector_rows,
-                    )
+                    with self.connect() as conn:
+                        conn.executemany(
+                            """INSERT OR REPLACE INTO vector_embeddings (
+                                   chunk_id, crawl_id, provider, model, dimension, embedding, created_at, content_hash, metadata_json
+                               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            vector_rows,
+                        )
+                        c_ids = [r[0] for r in vector_rows]
+                        placeholders = ",".join("?" for _ in c_ids)
+                        conn.execute(
+                            f"DELETE FROM failed_embedding_chunks WHERE crawl_id = ? AND provider = ? AND model = ? AND chunk_id IN ({placeholders})",
+                            (crawl_id, active_prov, active_model, *c_ids),
+                        )
+                    successful_count += len(vector_rows)
+            except Exception as batch_exc:
+                last_error = f"{type(batch_exc).__name__}: {batch_exc}"
+                err_lower = str(batch_exc).lower()
+                non_retryable = any(s in err_lower for s in ["400", "401", "403", "invalid api key", "invalid_api_key", "dimension mismatch", "unauthorized", "bad request"])
+                is_retryable = not non_retryable if getattr(batch_exc, "retryable", None) is None else bool(getattr(batch_exc, "retryable", False))
+                failed_count += len(batch)
+                fail_now = now()
+                with self.connect() as conn:
+                    for item in batch:
+                        conn.execute(
+                            """INSERT INTO failed_embedding_chunks (
+                                   crawl_id, chunk_id, provider, model, dimension, attempt_count, last_error, retryable, failed_at
+                               ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)
+                               ON CONFLICT(crawl_id, chunk_id, provider, model) DO UPDATE SET
+                                   attempt_count = failed_embedding_chunks.attempt_count + 1,
+                                   last_error = excluded.last_error,
+                                   retryable = excluded.retryable,
+                                   failed_at = excluded.failed_at""",
+                            (crawl_id, item["id"], active_prov, active_model, active_dim, last_error, int(is_retryable), fail_now),
+                        )
+
+        # Stage Outcome Accounting
+        if failed_count == 0:
+            final_status = StageStatus.SUCCESS
+            final_retryable = False
+        elif successful_count > 0:
+            final_status = StageStatus.PARTIAL
+            final_retryable = is_retryable
+        else:
+            final_status = StageStatus.FAILED
+            final_retryable = is_retryable
+
+        finish_now = now()
+        self.update_pipeline_stage(
+            crawl_id, PipelineStage.EMBEDDING, final_status,
+            provider=active_prov, model=active_model, dimension=active_dim,
+            total_items=total_chunks, successful_items=successful_count,
+            failed_items=failed_count, pending_items=failed_count,
+            error_message=last_error, retryable=final_retryable,
+            completed_at=finish_now,
+        )
+        self.update_pipeline_stage(
+            crawl_id, PipelineStage.INDEXING, final_status,
+            provider=active_prov, model=active_model, dimension=active_dim,
+            total_items=total_chunks, successful_items=successful_count,
+            failed_items=failed_count, pending_items=failed_count,
+            error_message=last_error, retryable=final_retryable,
+            completed_at=finish_now,
+        )
+
+        return {
+            "crawl_id": crawl_id,
+            "total_chunks": total_chunks,
+            "successful_items": successful_count,
+            "failed_items": failed_count,
+            "skipped_unchanged": skipped_count,
+            "status": final_status.value,
+            "provider": active_prov,
+            "model": active_model,
+            "dimension": active_dim,
+            "retryable": final_retryable,
+            "error_message": last_error,
+        }
+
+    def replace_knowledge_chunks(self, crawl_id: str, chunks: Iterable[KnowledgeChunk], embedder: EmbeddingProvider | None = None) -> None:
+        """Replace one crawl's local lexical and vector indexes atomically via the decoupled pipeline."""
+        self.index_knowledge_pipeline(crawl_id, chunks, embedder=embedder, force_reembed=True)
+
+    def retry_failed_embeddings(
+        self,
+        crawl_id: str,
+        embedder: EmbeddingProvider | None = None,
+    ) -> dict[str, Any]:
+        """Retry embedding for failed chunks without recrawling or re-embedding successful chunks."""
+        active_embedder = embedder or HashEmbeddingProvider()
+        active_model = getattr(active_embedder, "model_name", active_embedder.name)
+        active_prov = getattr(active_embedder, "name", "hash")
+        active_dim = getattr(active_embedder, "dimension", 0)
+
+        with self.connect() as conn:
+            failed_rows = conn.execute(
+                """SELECT f.chunk_id, k.content, k.content_hash, f.attempt_count
+                   FROM failed_embedding_chunks f
+                   JOIN knowledge_chunks k ON k.id = f.chunk_id
+                   WHERE f.crawl_id = ? AND f.retryable = 1
+                   ORDER BY f.chunk_id""",
+                (crawl_id,),
+            ).fetchall()
+
+        if not failed_rows:
+            return {
+                "crawl_id": crawl_id,
+                "retried": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "status": "no_failed_chunks",
+            }
+
+        self.update_pipeline_stage(
+            crawl_id, PipelineStage.EMBEDDING, StageStatus.RUNNING,
+            provider=active_prov, model=active_model, dimension=active_dim,
+        )
+        self.update_pipeline_stage(
+            crawl_id, PipelineStage.INDEXING, StageStatus.RUNNING,
+            provider=active_prov, model=active_model, dimension=active_dim,
+        )
+
+        succeeded_count = 0
+        still_failed_count = 0
+        last_error = ""
+        batch_size = max(1, getattr(active_embedder, "batch_size", 100))
+
+        for i in range(0, len(failed_rows), batch_size):
+            batch = failed_rows[i : i + batch_size]
+            texts = [r["content"] for r in batch]
+            try:
+                embeddings = active_embedder.embed_batch(texts, task_type="RETRIEVAL_DOCUMENT")
+                vector_rows = []
+                retry_now = now()
+                for r, vec in zip(batch, embeddings):
+                    if vec:
+                        emb_arr = array("f", vec)
+                        meta_dict = {
+                            "provider": active_prov,
+                            "model": active_model,
+                            "dimension": len(emb_arr),
+                            "created_at": retry_now,
+                            "task_type": "RETRIEVAL_DOCUMENT",
+                            "retried": True,
+                        }
+                        vector_rows.append((
+                            r["chunk_id"], crawl_id, active_prov, active_model,
+                            len(emb_arr), emb_arr.tobytes(), retry_now, r["content_hash"], json.dumps(meta_dict)
+                        ))
+
+                if vector_rows:
+                    with self.connect() as conn:
+                        conn.executemany(
+                            """INSERT OR REPLACE INTO vector_embeddings (
+                                   chunk_id, crawl_id, provider, model, dimension, embedding, created_at, content_hash, metadata_json
+                               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            vector_rows,
+                        )
+                        c_ids = [r[0] for r in vector_rows]
+                        placeholders = ",".join("?" for _ in c_ids)
+                        conn.execute(
+                            f"DELETE FROM failed_embedding_chunks WHERE crawl_id = ? AND chunk_id IN ({placeholders})",
+                            (crawl_id, *c_ids),
+                        )
+                    succeeded_count += len(vector_rows)
+            except Exception as retry_exc:
+                last_error = f"{type(retry_exc).__name__}: {retry_exc}"
+                err_lower = str(retry_exc).lower()
+                non_retryable = any(s in err_lower for s in ["400", "401", "403", "invalid api key", "invalid_api_key", "dimension mismatch", "unauthorized", "bad request"])
+                is_retryable = not non_retryable if getattr(retry_exc, "retryable", None) is None else bool(getattr(retry_exc, "retryable", False))
+                still_failed_count += len(batch)
+                retry_fail_now = now()
+                with self.connect() as conn:
+                    for r in batch:
+                        conn.execute(
+                            """UPDATE failed_embedding_chunks SET
+                                   attempt_count = attempt_count + 1,
+                                   last_error = ?,
+                                   retryable = ?,
+                                   failed_at = ?
+                               WHERE crawl_id = ? AND chunk_id = ?""",
+                            (last_error, int(is_retryable), retry_fail_now, crawl_id, r["chunk_id"]),
+                        )
+
+        with self.connect() as conn:
+            rem_failed = conn.execute(
+                "SELECT COUNT(*) as count FROM failed_embedding_chunks WHERE crawl_id = ?",
+                (crawl_id,),
+            ).fetchone()
+            vec_count = conn.execute(
+                "SELECT COUNT(*) as count FROM vector_embeddings WHERE crawl_id = ?",
+                (crawl_id,),
+            ).fetchone()
+            total_k = conn.execute(
+                "SELECT COUNT(*) as count FROM knowledge_chunks WHERE crawl_id = ?",
+                (crawl_id,),
+            ).fetchone()
+
+        remaining_failed = int(rem_failed["count"]) if rem_failed else 0
+        total_items = int(total_k["count"]) if total_k else 0
+        successful_items = int(vec_count["count"]) if vec_count else 0
+
+        retry_finish_now = now()
+        if remaining_failed == 0:
+            final_status = StageStatus.SUCCESS
+            self.update_pipeline_stage(
+                crawl_id, PipelineStage.EMBEDDING, final_status,
+                provider=active_prov, model=active_model, dimension=active_dim,
+                total_items=total_items, successful_items=successful_items,
+                failed_items=0, pending_items=0, completed_at=retry_finish_now,
+            )
+            self.update_pipeline_stage(
+                crawl_id, PipelineStage.INDEXING, final_status,
+                provider=active_prov, model=active_model, dimension=active_dim,
+                total_items=total_items, successful_items=successful_items,
+                failed_items=0, pending_items=0, completed_at=retry_finish_now,
+            )
+            self.update_pipeline_stage(
+                crawl_id, PipelineStage.RAG, StageStatus.SUCCESS,
+                provider=active_prov, model=active_model, dimension=active_dim,
+                metadata={"ready": True, "hybrid": True},
+                completed_at=retry_finish_now,
+            )
+            self.update_crawl(crawl_id, pause_reason="")
+        else:
+            final_status = StageStatus.PARTIAL if successful_items > 0 else StageStatus.FAILED
+            self.update_pipeline_stage(
+                crawl_id, PipelineStage.EMBEDDING, final_status,
+                provider=active_prov, model=active_model, dimension=active_dim,
+                total_items=total_items, successful_items=successful_items,
+                failed_items=remaining_failed, pending_items=remaining_failed,
+                error_message=last_error, retryable=True,
+                completed_at=retry_finish_now,
+            )
+            self.update_pipeline_stage(
+                crawl_id, PipelineStage.INDEXING, final_status,
+                provider=active_prov, model=active_model, dimension=active_dim,
+                total_items=total_items, successful_items=successful_items,
+                failed_items=remaining_failed, pending_items=remaining_failed,
+                error_message=last_error, retryable=True,
+                completed_at=retry_finish_now,
+            )
+
+        return {
+            "crawl_id": crawl_id,
+            "retried": len(failed_rows),
+            "succeeded": succeeded_count,
+            "failed": still_failed_count,
+            "remaining_failed": remaining_failed,
+            "status": final_status.value,
+        }
 
     def reembed_knowledge(self, crawl_id: str, embedder: EmbeddingProvider) -> dict[str, Any]:
         """Re-embed an existing crawl's knowledge chunks with a new model/provider without recrawling or modifying source content."""
@@ -577,7 +1206,7 @@ class Database:
             }
 
         active_model = getattr(embedder, "model_name", embedder.name)
-        active_prov = getattr(embedder, "provider_type", embedder.name)
+        active_prov = getattr(embedder, "name", "hash")
         now_ts = now()
         texts = [r["content"] for r in rows]
 
@@ -599,17 +1228,38 @@ class Database:
                     "reembedded": True,
                 }
                 vector_rows.append((
-                    r["id"], crawl_id, embedder.name, active_model,
+                    r["id"], crawl_id, active_prov, active_model,
                     len(emb_arr), emb_arr.tobytes(), now_ts, r["content_hash"], json.dumps(meta_dict)
                 ))
 
         with self.connect() as conn:
+            conn.execute("DELETE FROM failed_embedding_chunks WHERE crawl_id = ?", (crawl_id,))
             conn.executemany(
                 """INSERT OR REPLACE INTO vector_embeddings (
                        chunk_id, crawl_id, provider, model, dimension, embedding, created_at, content_hash, metadata_json
                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 vector_rows,
             )
+
+        self.update_pipeline_stage(
+            crawl_id, PipelineStage.EMBEDDING, StageStatus.SUCCESS,
+            provider=active_prov, model=active_model, dimension=embedder.dimension,
+            total_items=len(rows), successful_items=len(vector_rows),
+            failed_items=0, pending_items=0, completed_at=now_ts,
+        )
+        self.update_pipeline_stage(
+            crawl_id, PipelineStage.INDEXING, StageStatus.SUCCESS,
+            provider=active_prov, model=active_model, dimension=embedder.dimension,
+            total_items=len(rows), successful_items=len(vector_rows),
+            failed_items=0, pending_items=0, completed_at=now_ts,
+        )
+        self.update_pipeline_stage(
+            crawl_id, PipelineStage.RAG, StageStatus.SUCCESS,
+            provider=active_prov, model=active_model, dimension=embedder.dimension,
+            metadata={"ready": True, "hybrid": True},
+            completed_at=now_ts,
+        )
+        self.update_crawl(crawl_id, pause_reason="")
 
         return {
             "chunks_embedded": len(vector_rows),
@@ -793,6 +1443,7 @@ class Database:
             return selected
 
         active_model = getattr(active_embedder, "model_name", active_embedder.name)
+        active_prov = getattr(active_embedder, "provider_type", active_embedder.name)
         with self.connect() as conn:
             rows = conn.execute(
                 """SELECT k.id, k.page_id, k.crawl_id, k.url, k.canonical_url, k.title, k.section,
@@ -800,8 +1451,8 @@ class Database:
                           k.crawl_timestamp, k.parent_url, k.depth, k.content_hash, k.content, k.chunk_index,
                           v.embedding
                    FROM vector_embeddings v JOIN knowledge_chunks k ON k.id = v.chunk_id
-                   WHERE v.crawl_id = ? AND v.provider = ? AND (v.model = ? OR ? = '' OR v.model = '') AND v.dimension = ?""",
-                (crawl_id, active_embedder.name, active_model, active_model, len(query_vector)),
+                   WHERE v.crawl_id = ? AND (v.provider = ? OR v.provider = ?) AND (v.model = ? OR ? = '' OR v.model = '') AND v.dimension = ?""",
+                (crawl_id, active_prov, active_embedder.name, active_model, active_model, len(query_vector)),
             ).fetchall()
         vector_candidates = []
         for row in rows:

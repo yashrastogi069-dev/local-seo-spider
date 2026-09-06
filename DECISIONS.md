@@ -297,6 +297,35 @@ This document records the architectural and engineering decisions made for the L
   5. Crawling Independence:
      - The crawler core (`app/crawler.py`) has zero imports or dependencies on the embedding subsystem. Crawling never fails or blocks on embedding provider unavailability.
 - **Consequences**: Developers can immediately run semantic RAG locally with zero heavy PyTorch installs using Google Gemini API, test offline using hash embeddings, migrate models on-demand without recrawling, and protect API keys from exposure.
-
-
-
+### ADR-017: Pipeline Decoupling, Status Architecture & Re-Indexability (Phase 2G.2)
+- **Status**: Accepted & Certified
+- **Context**:
+  - Crawling, extraction, chunking, embedding, indexing, and RAG retrieval were previously grouped closely together.
+  - If an embedding provider failed, hit a 429 rate limit, or crashed midway through chunk generation, a crawl could appear broken or previously lexical data could be lost.
+  - The crawler data (`pages`, `links`, `issues`) is authoritative and durable, and must never be invalidated or recrawled because downstream vector embeddings failed.
+  - Switching embedding models or retrying failed chunks should not require recrawling websites or re-rendering web pages.
+- **Decision**:
+  1. Pipeline Model & Independent Stage Lifecycle (`app/types.py` & `app/database.py`):
+     - 7 distinct stages: `CRAWL`, `STORAGE`, `EXTRACTION`, `CHUNKING`, `EMBEDDING`, `INDEXING`, `RAG`.
+     - Explicit stage status states: `NOT_STARTED`, `RUNNING`, `SUCCESS`, `PARTIAL`, `FAILED`, `PENDING_RETRY`, `SKIPPED`.
+     - `pipeline_stage_records` table tracks stage forensic truth: `started_at`, `completed_at`, `provider`, `model`, `dimension`, `total_items`, `successful_items`, `failed_items`, `pending_items`, `error_message`, `retryable`, `metadata_json`.
+  2. Durable Lexical Chunking First:
+     - In `index_knowledge_pipeline`, `knowledge_chunks` and `knowledge_fts` are persisted in an atomic transaction first before vector embedding is attempted.
+     - Even if the embedding provider crashes, lexical search and chunks are 100% durable and queryable.
+  3. Fault Isolation & Partial Indexing:
+     - Chunks are embedded in batches. Successfully embedded chunks are saved immediately to `vector_embeddings`.
+     - Failed chunks are logged to `failed_embedding_chunks` with `(crawl_id, chunk_id, provider, model, dimension, attempt_count, last_error, retryable, failed_at)`.
+     - If some chunks succeed and others fail, stages transition to `PARTIAL`, keeping successfully embedded vectors intact.
+  4. Content Hashing Skip Logic:
+     - When re-indexing, chunks whose `content_hash` and `(provider, model, dimension)` already exist in `vector_embeddings` are skipped.
+     - If the model changes, vectors are generated freshly for all chunks, even if chunk text hash is unchanged.
+  5. Model Change Detection:
+     - `detect_embedding_generation_mismatch(crawl_id, embedder)` inspects existing indexed vector generations against requested embedders, detecting dimension or model differences and requiring re-indexing.
+     - `search_hybrid_knowledge` strictly partitions vectors by provider, model, and dimension, physically preventing cross-model vector corruption.
+  6. Retry Workflow:
+     - `retry_failed_embeddings(crawl_id, embedder)` queries only failed/unembedded chunks from `failed_embedding_chunks`, fetches text from `knowledge_chunks`, calls provider, inserts vectors, and transitions status to `SUCCESS` upon resolution without recrawling.
+  7. Observability Endpoints:
+     - `GET /crawls/{crawl_id}/pipeline`: Exposes status and model mismatch analysis.
+     - `POST /crawls/{crawl_id}/pipeline/retry-embedding`: Retries failed chunks and updates pipeline status.
+     - `POST /crawls/{crawl_id}/reembed`: Re-indexes knowledge with alternative model/provider.
+- **Consequences**: Crawl data is 100% durable; embedding outages never corrupt crawls; partial batches are tracked; model changes are observable and decoupled; retries only embed failed chunks.

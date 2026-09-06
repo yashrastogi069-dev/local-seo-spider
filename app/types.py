@@ -43,6 +43,68 @@ class FetchMode(str, Enum):
     SMART = "smart"
 
 
+class PipelineStage(str, Enum):
+    """Stages of the ingestion, indexing, and retrieval pipeline."""
+
+    CRAWL = "crawl"
+    STORAGE = "storage"
+    EXTRACTION = "extraction"
+    CHUNKING = "chunking"
+    EMBEDDING = "embedding"
+    INDEXING = "indexing"
+    RAG = "rag"
+
+
+class StageStatus(str, Enum):
+    """Lifecycle and operational states for individual pipeline stages."""
+
+    NOT_STARTED = "not_started"
+    RUNNING = "running"
+    SUCCESS = "success"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    PENDING_RETRY = "pending_retry"
+    SKIPPED = "skipped"
+
+
+@dataclass
+class StageRecord:
+    """Forensic status record for a single pipeline stage."""
+
+    stage: str
+    status: str
+    started_at: str = ""
+    completed_at: str = ""
+    provider: str = ""
+    model: str = ""
+    dimension: int = 0
+    total_items: int = 0
+    successful_items: int = 0
+    failed_items: int = 0
+    pending_items: int = 0
+    error_message: str = ""
+    retryable: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stage": self.stage,
+            "status": self.status,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "provider": self.provider,
+            "model": self.model,
+            "dimension": self.dimension,
+            "total_items": self.total_items,
+            "successful_items": self.successful_items,
+            "failed_items": self.failed_items,
+            "pending_items": self.pending_items,
+            "error_message": self.error_message,
+            "retryable": self.retryable,
+            "metadata": self.metadata,
+        }
+
+
 class CancellationToken:
     """Thread-safe, picklable cancellation token for cooperative crawler termination."""
 

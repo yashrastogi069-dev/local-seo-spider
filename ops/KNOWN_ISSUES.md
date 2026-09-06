@@ -4,15 +4,18 @@ This document tracks known architectural limitations, operational requirements, 
 
 ---
 
-## 1. Embedding Provider Dependency
-- **Issue**: Deep neural semantic embedding requires the heavy optional dependency `sentence-transformers` (and its dependencies `torch`, `transformers`, `huggingface-hub`).
-- **Current Mitigation**: When `sentence-transformers` is unavailable, the system defaults to `HashEmbeddingProvider`, an offline, deterministic 64-dimensional pseudo-random projection.
-- **Impact**: In the offline fallback mode, vector-only retrieval produces low recall for conceptual paraphrase matching because hash projections lack deep semantic language representations. However, hybrid retrieval with BM25 lexical indexing (`FTS5`) compensates effectively.
-- **Resolution for Production**: In production environments requiring conceptual paraphrasing, install the optional extra:
-  ```bash
-  pip install sentence-transformers
-  ```
-  and configure `SPIDER_EMBEDDING_PROVIDER=sentence-transformers`.
+## 1. Embedding Provider Dependency & Lifecycle Decoupling
+- **Issue**: Deep neural semantic embedding previously required the heavy optional dependency `sentence-transformers` (and its dependencies `torch`, `transformers`, `huggingface-hub`).
+- **Current Architecture (Phase 2G.1 & 2G.2)**:
+  - The embedding subsystem is provider-independent via `EmbeddingProvider` Protocol.
+  - The system supports hosted API providers (Google Gemini `text-embedding-004`), offline deterministic test hashing (`HashEmbeddingProvider`), and optional local Hugging Face neural models (`SentenceTransformersProvider`).
+  - Crawling and storage are fully decoupled from embedding. A provider failure or rate limit NEVER destroys or invalidates a crawl.
+  - Chunks are stored in lexical FTS5 first before vector embeddings are attempted. Lexical retrieval remains 100% operational during embedding outages.
+  - Targeted retries (`POST /crawls/{crawl_id}/pipeline/retry-embedding`) and re-embedding (`POST /crawls/{crawl_id}/reembed`) allow recovering from failures or switching models without recrawling.
+- **Production Recommendations**:
+  - Configure `SPIDER_GEMINI_API_KEY` for hosted embeddings (fast, lightweight, 768-dim vectors).
+  - For local neural models without external API keys, install `sentence-transformers` and configure `SPIDER_EMBEDDING_PROVIDER=sentence-transformers`.
+
 
 ---
 

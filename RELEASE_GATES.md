@@ -139,9 +139,22 @@ This document defines the strict, non-negotiable release gates for every phase o
 - [x] Zero crawler dependency on embedding availability (crawl continues regardless of embedding provider health).
 - [x] 17 comprehensive tests in `tests/test_hosted_embeddings.py` (16 passed, 1 skipped cleanly when live key absent).
 - [x] ADR-016 recorded in `DECISIONS.md`.
-- **SUBPHASE 2G.1 GATE STATUS**: **PASSED**
+#### Subphase 2G.2: Pipeline Decoupling & Re-Indexability
+- [x] Pipeline stage decoupling: independent stage tracking for `CRAWL`, `STORAGE`, `EXTRACTION`, `CHUNKING`, `EMBEDDING`, `INDEXING`, `RAG`.
+- [x] Independent stage statuses: `NOT_STARTED`, `RUNNING`, `SUCCESS`, `PARTIAL`, `FAILED`, `PENDING_RETRY`, `SKIPPED`.
+- [x] Forensic status record table: `pipeline_stage_records` storing counters, provider/model metadata, error messages, and retryable flags.
+- [x] 100% crawl data durability: raw crawled pages, links, and issues are never invalidated, deleted, or marked failed due to embedding/indexing errors.
+- [x] Lexical chunking persistence priority: `knowledge_chunks` and `knowledge_fts` committed to disk before vector embeddings are attempted; lexical search remains fully queryable during embedding provider outages.
+- [x] Fault isolation & partial indexing: provider failures midway leave successful vectors intact and log failed chunks in `failed_embedding_chunks` with `retryable=True`.
+- [x] Content hashing deduplication: chunks with identical `content_hash` and matching `(provider, model, dimension)` skip embedding calls during re-indexing.
+- [x] Model change detection: `detect_embedding_generation_mismatch` detects provider, model, or dimension differences, prevents silent mixing, and triggers clean re-indexing.
+- [x] Targeted retry workflow: `retry_failed_embeddings(crawl_id)` queries only failed chunks, embeds them, and transitions stage status to `SUCCESS` without recrawling or re-embedding successful chunks.
+- [x] Observability endpoints: `GET /crawls/{crawl_id}/pipeline`, `POST /crawls/{crawl_id}/pipeline/retry-embedding`, and `POST /crawls/{crawl_id}/reembed`.
+- [x] Test suite: 11 comprehensive tests in `tests/test_pipeline_decoupling.py` verifying all failure scenarios and data durability.
+- [x] ADR-017 recorded in `DECISIONS.md`.
+- **SUBPHASE 2G.2 GATE STATUS**: **PASSED**
 
-- **GATE STATUS**: **PASSED (Phase 2G & 2G.1 Certified)**
+- **GATE STATUS**: **PASSED (Phase 2G, 2G.1 & 2G.2 Certified)**
 
 ### PHASE 3: Universal Extraction
 - [x] Preservation of JSON deep semantics, scalar types, and nested object relationships.

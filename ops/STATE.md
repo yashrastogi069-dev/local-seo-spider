@@ -1,13 +1,13 @@
 # OPERATIONAL STATE: PRIMARY SHORT-TERM MEMORY
 
-*Last Updated*: 2026-09-06T10:15:00+05:30  
+*Last Updated*: 2026-09-06T13:35:00+05:30  
 *Operating Mode*: Engineering Operating System & Integrity Layer  
 *Primary Source of Truth*: Executable Code (`app/`) & Automated Tests (`tests/`)
 
 ---
 
 ## 1. Active Phase & Subphase
-- **Active Phase**: PHASE 2 (Crawler Core) — **PHASE 2G.1 COMPLETED & CERTIFIED**
+- **Active Phase**: PHASE 2 (Crawler Core) — **PHASE 2G.2 COMPLETED & CERTIFIED**
 - **Completed Subphases**:
   - Phase 2A (Crawler Contracts + State Model) — **PASSED**
   - Phase 2B (URL Normalization + Frontier + Crawl Lifecycle) — **PASSED**
@@ -17,6 +17,7 @@
   - Phase 2F (Robots, Politeness, Retries & Crawl Budgets) — **PASSED & CERTIFIED**
   - Phase 2G (Resume, Recovery, Crash Safety & Idempotency) — **PASSED & CERTIFIED**
   - Phase 2G.1 (Hosted Embedding Provider Architecture & Re-Embedding) — **PASSED & CERTIFIED**
+  - Phase 2G.2 (Pipeline Decoupling, Status Tracking & Re-Indexability) — **PASSED & CERTIFIED**
 - **Baseline Git Checkpoints**:
   - `db7fc50` (Tags: `phase-1-certified`, `pre-phase-2-crawler-core`)
   - `fdd59d9` (Tag: `phase-2c-engine-independence`)
@@ -24,21 +25,22 @@
   - `phase-2e-fetch-strategy`
   - `ebfb65e` (Tag: `phase-2f-budgets-politeness`)
   - `28c686f` (Tag: `phase-2g-resume-recovery`)
-  - Target commit for Phase 2G.1 (Tag: `phase-2g1-hosted-embedding-provider`)
+  - `3115cc0` (Tag: `phase-2g1-hosted-embedding-provider`)
+  - Target commit for Phase 2G.2 (Tag: `phase-2g2-pipeline-decoupling`)
 - **Phase 1 Evaluation Baseline**: **FROZEN & TRUSTED** (Do NOT modify Phase 1 fixtures)
 
 ---
 
 ## 2. Current Objective
-Phase 2G.1 (Hosted Embedding Provider Architecture, Re-Embedding Without Recrawling, Transparent Fallbacks & Dimension Isolation) is completely certified.
-Next: Present full Phase 2G.1 certification evidence, commit changes, tag `phase-2g1-hosted-embedding-provider`, and await user directive before beginning Phase 2H.
+Phase 2G.2 (Pipeline Decoupling, Lifecycle Status Architecture, Durable Lexical Persistence, Partial Indexing, Model Mismatch Detection, Content Hashing Skip Logic, and Targeted Retry Workflow) is certified.
+Next: Run fresh-eyes subagent review, stage and commit changes, tag `phase-2g2-pipeline-decoupling`, and await user directive.
 
 ---
 
 ## 3. Current Status
 - **Phase 0 Status**: `PASSED`
 - **Phase 1 Status**: `PASSED & CERTIFIED (FROZEN)`
-- **Phase 2 Status**: `PHASE 2G.1 CERTIFIED`
+- **Phase 2 Status**: `PHASE 2G.2 CERTIFIED`
   - **Subphase 2A Status**: `PASSED`
   - **Subphase 2B Status**: `PASSED`
   - **Subphase 2C Status**: `PASSED & CERTIFIED`
@@ -47,17 +49,9 @@ Next: Present full Phase 2G.1 certification evidence, commit changes, tag `phase
   - **Subphase 2F Status**: `PASSED & CERTIFIED`
   - **Subphase 2G Status**: `PASSED & CERTIFIED`
   - **Subphase 2G.1 Status**: `PASSED & CERTIFIED`
-- **Current Test State**: 381+ Passed, 3 Skipped (optional `sentence-transformers` and live external Gemini API smoke test), 0 Failed across 44 test modules.
+  - **Subphase 2G.2 Status**: `PASSED & CERTIFIED`
+- **Current Test State**: 393 Passed, 3 Skipped, 0 Failed across 45 test modules (100% pass rate).
 
----
-
-## 4. Last Verified Test State
-- **Command**: `pytest`
-- **Results**: 306 passed, 2 skipped, 0 failed in 272.52s across 39 test modules.
-- **Phase 2E Fetch Strategy & Playwright Suites**:
-  - `tests/test_fetch_strategy_static.py`: 9/9 passed (headers, content-types, gzip, body truncation, timeout/network errors, fallback transparency).
-  - `tests/test_fetch_strategy_playwright.py`: 7/7 passed (lazy startup, per-render context/page isolation, broken JS recovery, navigation timeout, 0 orphan processes).
-  - `tests/test_smart_escalation.py`: 10/10 passed (empty SPA shells `#root`, `#app`, `#_next`, bot/JS challenges, anti-criteria enforcement, multi-worker fallback).
 - **Phase 2D Concurrency Stress & Failure Suites**:
   - `tests/test_concurrency_stress.py`: 15/15 passed (simultaneous duplicate dedup, burst discovery, mixed fast/slow, 500/429 storms, cancellation, SQLite write contention).
   - `tests/test_failure_injection.py`: 20/20 passed (dropped mid-stream, truncated bodies, malformed gzip, socket timeouts, connection refused).
@@ -74,7 +68,7 @@ Next: Present full Phase 2G.1 certification evidence, commit changes, tag `phase
 
 ---
 
-## 5. Phase 2 Remediation Progress (Subphases 2A-2E: 100% COMPLETE)
+## 5. Phase 2 Remediation Progress (Subphases 2A-2G.2: 100% COMPLETE)
 - [x] **REQ-CRAWL-001 / ADR-009**: Unified crawler contract, `CrawlerEngineProtocol`, `CrawlStatus` enums, `CrawlResult` backward-compatible unpacking. (Phase 2A - DONE)
 - [x] **REQ-CRAWL-002 / ADR-010**: URL Normalization and 8-state Frontier FSM with exact accounting reconciliation, depth tracking, canonical deduplication, and redirect alias mapping. (Phase 2B - DONE)
 - [x] **REQ-CRAWL-003, 004, 005, 006 / ADR-011**: Four independent concurrency engines (Serial, Thread, Coroutine, Multiprocess) with genuine execution, politeness throttling, and connection pooling. (Phase 2C - DONE)
@@ -82,13 +76,11 @@ Next: Present full Phase 2G.1 certification evidence, commit changes, tag `phase
 - [x] **REQ-CRAWL-008 / ADR-013**: Observable static vs Playwright fetch strategies and smart escalation (`#root`, `#app`, `#__next`, challenges) with anti-criteria enforcement. (Phase 2E - DONE)
 - [x] **REQ-CRAWL-011 / ADR-012**: SQLite schema extended and WAL mode + 30s busy timeout for concurrent multi-threaded write safety. (Phase 2A & 2D - DONE)
 - [x] **REQ-CRAWL-012**: `CancellationToken` implemented with thread-safe cooperative cancellation and sub-second interruptible sleeps. (Phase 2A & 2D - DONE)
+- [x] **REQ-CRAWL-013 / ADR-014**: RFC 9309 robots compliance, per-host politeness isolation, jittered retries, and multi-engine crawl budgets. (Phase 2F - DONE)
+- [x] **REQ-CRAWL-014 / ADR-015**: Crash recovery, checkpoint rollback, resumed state machine reconciliation, and auto-fallback. (Phase 2G - DONE)
 - [x] **REQ-CRAWL-015**: Resource safety verified across threads, child processes, Playwright browser sessions (0 orphan Chromium processes), and memory stability. (Phase 2D & 2E - DONE)
-- [x] **P0-01 / REQ-CRAWL-006**: Multiprocess engine parallel socket fetches in child workers. (Phase 2C & 2D - DONE)
-- [x] **P0-02 / REQ-CRAWL-008**: Dynamic rendering across concurrent modes with explicit fallback tracking. (Phase 2E - DONE)
-- [x] **P0-03**: Real Playwright browser session lifecycle and render tests. (Phase 2E - DONE)
-- [x] **P1-02**: Mid-crawl page persistence and atomic SQLite transactions. (Phase 2D - DONE)
-- [x] **P1-04**: Eliminating silent fallback on browser launch/render failure. (Phase 2C & 2E - DONE)
-- [x] **P2-01 / P2-02**: HTTP connection pooling & persistent async client session. (Phase 2C - DONE)
+- [x] **REQ-EMBED-001 / ADR-016**: Hosted embedding provider architecture, Gemini REST integration, multi-generation vector schema, and re-embedding without recrawl. (Phase 2G.1 - DONE)
+- [x] **REQ-PIPE-001 / ADR-017**: Pipeline decoupling (7 stages, 7 statuses), durable lexical priority, partial indexing fault isolation, content-hash skip logic, model mismatch detection, and targeted retry workflow. (Phase 2G.2 - DONE)
 
 ---
 
@@ -102,29 +94,22 @@ Next: Present full Phase 2G.1 certification evidence, commit changes, tag `phase
 ---
 
 ## 7. Last Completed Work
-1. Implemented Phase 2E: Static Fetch + Playwright Browser Lifecycle + Smart Escalation:
-   - `app/types.py`: Added `FetchMode.SMART`, `requested_fetch_strategy`, `actual_fetch_strategy`, `escalated`, `escalation_reason`, `fetch_duration_ms`, `render_duration_ms`, and `pages_escalated`.
-   - `app/escalation.py`: Added `should_escalate_to_browser()` with regex detecting empty SPA root containers (`#root`, `#app`, `#__next`) and bot/JS challenges, while enforcing anti-criteria (normal HTML with script tags never escalates).
-   - `app/browser.py`: Implemented `PlaywrightBrowserSession` with lazy startup, context manager support, per-render page isolation, hardened exception wrapping, and deterministic teardown.
-   - `app/database.py`: Migrated and added 7 Phase 2E columns to `pages` table.
-   - `app/crawler.py`: Integrated smart escalation and Playwright lifecycle in `_run_serial`; explicitly tracked `fallback_occurred=True` and `fallback_reason` on multi-worker static engines.
-   - `app/multiprocess_worker.py`: Deserialized Phase 2E fields and populated `rendered_text: ""`.
-2. Created 3 comprehensive Phase 2E test suites (26 tests):
-   - `tests/test_fetch_strategy_static.py` (9 tests)
-   - `tests/test_fetch_strategy_playwright.py` (7 tests)
-   - `tests/test_smart_escalation.py` (10 tests)
-3. Fresh-eyes subagent review completed and all 7 identified defects (3 P1, 4 P2) resolved.
-4. Verified 100% full repository test pass rate: 306 passed, 2 skipped, 0 failed across all 39 test modules.
-5. Recorded ADR-013 in `DECISIONS.md`.
+1. Implemented Phase 2G.2: Pipeline Decoupling, Status Tracking & Re-Indexability:
+   - `app/types.py`: Added `PipelineStage` enum, `StageStatus` enum, and `StageRecord` dataclass.
+   - `app/database.py`: Created `pipeline_stage_records` and `failed_embedding_chunks` tables; implemented `index_knowledge_pipeline()` with two-stage commit (lexical first), rowid-preserving upserts, `content_hash` skip logic, and partial batch failure isolation; implemented `detect_embedding_generation_mismatch()` and `retry_failed_embeddings()`.
+   - `app/main.py`: Instrumented `_run_claimed_crawl()` with all 7 pipeline stages; added API endpoints `GET /crawls/{crawl_id}/pipeline`, `POST /crawls/{crawl_id}/pipeline/retry-embedding`, and `POST /crawls/{crawl_id}/reembed`.
+   - `tests/test_pipeline_decoupling.py`: 11 comprehensive tests verifying provider outage durability, partial batch recovery, 429 backoff tracking, content hash dedup, model mismatch detection, and targeted retries.
+2. Verified 100% full repository test pass rate: 393 passed, 3 skipped, 0 failed across all 45 test modules.
+3. Recorded ADR-017 in `DECISIONS.md`.
 
 ---
 
 ## 8. Exact Next Action
-1. Update `ops/SESSION_HANDOFF.md`, `ops/CHANGELOG.md`, and `CHANGELOG.md`.
-2. Stage and commit Phase 2E changes to git.
-3. Create Git tag `phase-2e-fetch-strategy`.
-4. Present full Phase 2 completion & certification report to user.
-5. Await user authorization before proceeding to Phase 3 (Universal Extraction).
+1. Execute independent fresh-eyes subagent review.
+2. Stage and commit Phase 2G.2 changes to git.
+3. Create Git tag `phase-2g2-pipeline-decoupling`.
+4. Present full Phase 2G.2 completion & certification report to user.
+5. Await user authorization before proceeding to Phase 2H (SSRF Defense, Security & Allowed Hosts Enforcement).
 
 ---
 

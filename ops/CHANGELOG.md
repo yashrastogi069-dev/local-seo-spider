@@ -4,12 +4,12 @@ All notable changes, phase executions, and architectural transitions for Local S
 
 ---
 
-## Current Status: Phase 0, Phase 1, Phase 2 Complete (2A-2G.1 Certified) / Ready for Phase 2H
+## Current Status: Phase 0, Phase 1, Phase 2 Complete (2A-2G.2 Certified) / Ready for Phase 2H
 
 ### Current Phase State:
 - **PHASE 0 (Baseline & Forensic Audit)**: COMPLETED / PASSED
 - **PHASE 1 (Evaluation Integrity)**: COMPLETED / PASSED
-- **PHASE 2 (Crawler Core)**: ACTIVE / SUBPHASES 2A-2G.1 CERTIFIED
+- **PHASE 2 (Crawler Core)**: ACTIVE / SUBPHASES 2A-2G.2 CERTIFIED
   - **Subphase 2A (Contracts & State Model)**: COMPLETED / PASSED
   - **Subphase 2B (URL Normalization + Frontier + Crawl Lifecycle)**: COMPLETED / PASSED
   - **Subphase 2C (Four Independent Concurrency Engines)**: COMPLETED / PASSED & CERTIFIED
@@ -18,6 +18,7 @@ All notable changes, phase executions, and architectural transitions for Local S
   - **Subphase 2F (Robots, Politeness, Retries & Crawl Budgets)**: COMPLETED / PASSED & CERTIFIED
   - **Subphase 2G (Resume, Recovery, Crash Safety & Embedding Auto-Fallback)**: COMPLETED / PASSED & CERTIFIED
   - **Subphase 2G.1 (Hosted Embedding Provider Architecture & Re-Embedding)**: COMPLETED / PASSED & CERTIFIED
+  - **Subphase 2G.2 (Pipeline Decoupling, Status Tracking & Re-Indexability)**: COMPLETED / PASSED & CERTIFIED
 - **Subphase 2H (SSRF Defense, Security & Allowed Hosts Enforcement)**: READY TO BEGIN
 - **PHASE 3 (Universal Extraction)**: PENDING
 - **PHASE 4 (Knowledge/Indexing/Search)**: PENDING
@@ -25,6 +26,54 @@ All notable changes, phase executions, and architectural transitions for Local S
 - **PHASE 6 (Web Intelligence)**: PENDING
 - **PHASE 7 (UI/UX)**: PENDING
 - **PHASE 8 (Final Certification)**: PENDING
+
+---
+
+## [Phase 2G.2: Pipeline Decoupling & Re-Indexability] - 2026-09-06
+
+### Added
+- **Pipeline Stage & Status Architecture (`app/types.py`)**:
+  - Implemented `PipelineStage` enum: `CRAWL`, `STORAGE`, `EXTRACTION`, `CHUNKING`, `EMBEDDING`, `INDEXING`, `RAG`.
+  - Implemented `StageStatus` enum: `NOT_STARTED`, `RUNNING`, `SUCCESS`, `PARTIAL`, `FAILED`, `PENDING_RETRY`, `SKIPPED`.
+  - Implemented `StageRecord` dataclass tracking stage metadata (`stage`, `status`, `started_at`, `completed_at`, `error_message`, `retryable`, `metadata_json`, `to_dict()`).
+- **Pipeline Persistence & Fault Isolation (`app/database.py`)**:
+  - Added `pipeline_stage_records` table and index `idx_pipeline_stages_crawl_stage`.
+  - Added `failed_embedding_chunks` table and index `idx_failed_chunks_crawl_chunk`.
+  - Implemented `update_pipeline_stage()`, `get_pipeline_stage()`, `get_pipeline_status()`.
+  - Implemented `detect_embedding_generation_mismatch()`: verifies existing vectors match current embedder (provider, model, dimension); returns explicit mismatch diagnosis.
+  - Implemented `index_knowledge_pipeline(crawl_id, chunks, embedder, force_reembed=False)`:
+    - Decoupled two-stage commit: lexical chunks (`knowledge_chunks`, `knowledge_fts`) are committed to SQLite *before* any vector embedding calls are attempted.
+    - Preserves rowids using `INSERT ... ON CONFLICT(crawl_id, page_id, chunk_index) DO UPDATE`.
+    - Content hash deduplication: skips embedding calls when `content_hash` and `(provider, model, dimension)` match existing vector.
+    - Fault-isolated batch processing: mid-batch embedding failures record failed chunk IDs in `failed_embedding_chunks` with `retryable` status without discarding successful vectors.
+    - Transitions `EMBEDDING` stage to `PARTIAL` on partial batch failures and marks `INDEXING` as `PARTIAL`.
+    - Guarantees 100% crawl durability: an embedding outage or failure NEVER deletes or invalidates crawled pages, links, or issues.
+  - Implemented `retry_failed_embeddings(crawl_id, embedder=None)`: queries only failed chunks from `failed_embedding_chunks`, generates vectors, and transitions stages to `SUCCESS`.
+- **API & Observability Endpoints (`app/main.py`)**:
+  - Updated `_run_claimed_crawl()` with granular pipeline stage tracking across all 7 stages.
+  - Added `GET /crawls/{crawl_id}/pipeline`: returns status and execution timing of all pipeline stages.
+  - Added `POST /crawls/{crawl_id}/pipeline/retry-embedding`: triggers targeted retry of failed chunks.
+  - Added `POST /crawls/{crawl_id}/reembed`: triggers complete re-indexing with model change validation.
+- **Verification Suite (`tests/test_pipeline_decoupling.py`)**:
+  - 12 comprehensive test cases (100% passing):
+    1. `test_embedding_failure_does_not_destroy_crawl`: crawling, pages, links durable when provider fails before indexing.
+    2. `test_partial_embedding_preserves_successful_vectors`: mid-batch failure preserves first batch vectors and records retryable failed chunks.
+    3. `test_rate_limit_preserves_crawl_and_records_pending_retry`: HTTP 429 transitions embedding to `FAILED`/`PENDING_RETRY` with retryable flag.
+    4. `test_content_hash_deduplication_skips_embedding_calls`: unchanged chunks skip embedding API calls.
+    5. `test_model_change_detection_requires_reindex`: model name or dimension changes are detected.
+    6. `test_targeted_retry_embeds_only_failed_chunks`: retry processes only failed chunks without recrawling or re-embedding successful chunks.
+    7. `test_retry_failure_leaves_chunks_pending`: repeated failure leaves chunks in failed state with retry count.
+    8. `test_all_crawl_data_100_percent_durable_on_fatal_indexing_crash`: pages, links, issues, crawl status remain completely intact after fatal indexing crash.
+    9. `test_dimension_mismatch_fails_pipeline_without_vector_corruption`: dimension mismatches fail cleanly.
+    10. `test_identical_text_different_model_forces_reembed`: changing model on identical text forces vector recomputation.
+    11. `test_pipeline_api_endpoints`: verifies GET pipeline status and POST retry-embedding endpoints.
+    12. `test_provider_type_vs_name_harmony_and_rag_retry_propagation`: verifies provider naming harmony, RAG stage retry propagation, and ghost chunk pruning.
+- **Audit Remediation**:
+  - Harmonized `embedder.name` and `provider_type` across indexing, search, re-embedding, and mismatch detection.
+  - Propagated `PipelineStage.RAG` to `SUCCESS` and cleared `pause_reason` on complete retry resolution.
+  - Added stale ghost chunk pruning when page chunk boundaries shrink.
+  - Purged `failed_embedding_chunks` prior to full re-embedding in `reembed_knowledge`.
+- Recorded **ADR-017** in `DECISIONS.md` and Section 10 in `TEST_MATRIX.md`.
 
 ---
 
