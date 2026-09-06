@@ -177,6 +177,7 @@ class UrlNormalizationPolicy:
     dedup_query_params: bool = True
     strip_tracking_params: bool = True
     redact_sensitive_params: bool = False
+    strip_session_ids: bool = True
     trailing_slash: str = "strip"  # "preserve", "strip", "append"
 
 
@@ -289,6 +290,10 @@ def normalize_url(
             netloc = f"{formatted_host}:{port}"
 
     path = parsed.path or "/"
+    if policy.strip_session_ids:
+        # Strip path-embedded session tokens (Java servlet, ASP.NET cookieless, PHP sid)
+        path = re.sub(r";(?:jsessionid|sid|phpsessid)=[A-Za-z0-9_\-]+", "", path, flags=re.IGNORECASE)
+        path = re.sub(r"/\([Ss]\([A-Za-z0-9_\-]{6,}\)\)", "", path)
     if policy.resolve_dot_segments:
         path = remove_dot_segments(path)
     if policy.normalize_percent_encoding:
@@ -398,4 +403,32 @@ def safe_filename(value: str, fallback: str = "export") -> str:
 
 def visible_url(value: str, limit: int = 86) -> str:
     return value if len(value) <= limit else f"{value[: limit - 1]}…"
+    
+
+def detect_path_loop(url_or_path: str, max_repeats: int = 3) -> bool:
+    """Detect repeating directory loops / cyclic path traps (e.g. /a/b/a/b/a/b)."""
+    if not url_or_path:
+        return False
+    try:
+        path = urlsplit(url_or_path).path if ("://" in url_or_path or url_or_path.startswith("//")) else url_or_path
+        path = path.split("?")[0].split("#")[0]
+        segments = [s.lower() for s in path.split("/") if s]
+        n = len(segments)
+        if n < max_repeats:
+            return False
+
+        # Check sequence lengths k from 1 to 5
+        for k in range(1, min(6, n // max_repeats + 1)):
+            for start in range(0, n - k * max_repeats + 1):
+                pattern = segments[start : start + k]
+                repeats = 1
+                curr = start + k
+                while curr + k <= n and segments[curr : curr + k] == pattern:
+                    repeats += 1
+                    curr += k
+                if repeats >= max_repeats:
+                    return True
+        return False
+    except Exception:
+        return False
 

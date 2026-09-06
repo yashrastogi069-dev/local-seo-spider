@@ -101,7 +101,17 @@ This document defines the strict, non-negotiable release gates for every phase o
 - [x] Resource cleanup (zero orphan browser processes, zero leaked contexts/pages).
 - **SUBPHASE 2E GATE STATUS**: **PASSED**
 
-- **GATE STATUS**: **PASSED (Phase 2 Certified)**
+#### Subphase 2F: Robots, Politeness, Retries & Crawl Budgets
+- [x] RFC 9309 robots compliance: 5xx and 429 fail-closed / disallow-all, 4xx allow-all, network errors allow-all (permitting target socket error capture), `Crawl-delay` parsed with user-agent specificity and enforced per host across all engines.
+- [x] Per-host concurrency & politeness: `DomainPolitenessThrottler` and `AsyncDomainPolitenessThrottler` with isolated semaphores, zero cross-host interference, dual host/netloc keying, completion time recording.
+- [x] Bounded retries: strict classification of retryable vs non-retryable errors, `max_retries` bounded, `Retry-After` (seconds and HTTP-date) parsed and bounded, uniform random jitter (0.8-1.2) preventing retry storms.
+- [x] Multi-engine crawl budgets: `max_pages`, `max_depth`, `max_bytes`, `max_duration_seconds`, `redirect_limit` enforced across all 4 engines (`serial`, `thread`, `async`, `process`) with deterministic transition to `CrawlStatus.BUDGET_EXHAUSTED` and observable termination reason.
+- [x] Infinite site defenses: session stripping (`;jsessionid=`, `/(S(...))/`, `;sid=`, `;phpsessid=`), path loop cycle detection (`detect_path_loop`), soft-404 cryptographic text deduplication, and pagination bounding.
+- [x] Dedicated test suites: 33 tests across `test_robots_and_politeness.py`, `test_crawl_budgets.py`, and `test_infinite_site_defense.py`.
+- [x] Full regression suite passes: 341 passed, 2 skipped, 0 failed across all 343 tests.
+- **SUBPHASE 2F GATE STATUS**: **PASSED**
+
+- **GATE STATUS**: **PASSED (Phase 2F Certified)**
 
 ### PHASE 3: Universal Extraction
 - [x] Preservation of JSON deep semantics, scalar types, and nested object relationships.

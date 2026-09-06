@@ -58,12 +58,20 @@ class PlaywrightBrowserSession:
     def is_active(self) -> bool:
         return self._is_active
 
-    def render_url(self, url: str, max_document_bytes: int = 200_000) -> tuple[str, str, str, float]:
+    def render_url(
+        self,
+        url: str,
+        max_document_bytes: int = 200_000,
+        cancellation_token: Any = None,
+    ) -> tuple[str, str, str, float]:
         """Render a URL in an isolated page and extract rendered DOM and text.
 
         Returns:
             tuple[str, str, str, float]: (rendered_html, rendered_text, render_error, duration_ms)
         """
+        if cancellation_token and getattr(cancellation_token, "is_cancelled", lambda: False)():
+            return "", "", "Rendering cancelled", 0.0
+
         t_start = time.monotonic()
         page = None
         try:

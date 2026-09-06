@@ -25,12 +25,26 @@ class ControlledHandler(BaseHTTPRequestHandler):
         base = f"http://127.0.0.1:{port}"
 
         if path == "/robots.txt":
-            body = "User-agent: *\nAllow: /\nDisallow: /blocked\n"
+            status = getattr(self.server, "robots_status_code", 200)
+            if status != 200:
+                self._send_text(status, f"HTTP {status} robots unavailable", "text/plain")
+                return
+            body = getattr(self.server, "robots_content", "User-agent: *\nDisallow: /blocked\nAllow: /\n")
             self._send_text(200, body, "text/plain")
 
         elif path == "/blocked":
             body = "<html><body><h1>Disallowed by robots</h1></body></html>"
             self._send_html(200, body)
+
+        elif path == "/robots-test":
+            body = """<html><body><h1>Robots Test Page</h1>
+            <a href="/robots-allowed">Allowed Page</a>
+            <a href="/blocked">Blocked Page</a>
+            </body></html>"""
+            self._send_html(200, body)
+
+        elif path == "/robots-allowed":
+            self._send_html(200, "<html><body><h1>Allowed Page</h1></body></html>")
 
         elif path == "/":
             body = f"""<!DOCTYPE html>
@@ -497,6 +511,74 @@ class ControlledHandler(BaseHTTPRequestHandler):
             repeated_body = "<p>Repeated paragraph for response size measurement.</p>\n" * 1200
             self._send_html(200, f"<html><body><h1>Large Document</h1>{repeated_body}</body></html>")
 
+        # Phase 2F: Trap & Budget Test Endpoints
+        elif path.startswith("/trap/calendar"):
+            parts = path.strip("/").split("/")
+            # e.g. ["trap", "calendar", "2026", "1"]
+            year = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 2026
+            month = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
+            next_m = month + 1 if month < 12 else 1
+            next_y = year if month < 12 else year + 1
+            prev_m = month - 1 if month > 1 else 12
+            prev_y = year if month > 1 else year - 1
+            body = f"""<html><body><h1>Calendar {year}-{month:02d}</h1>
+            <a href="/trap/calendar/{next_y}/{next_m}">Next Month</a>
+            <a href="/trap/calendar/{prev_y}/{prev_m}">Prev Month</a>
+            </body></html>"""
+            self._send_html(200, body)
+
+        elif path.startswith("/trap/loop"):
+            # e.g. /trap/loop/step1/step2
+            subpath = path[len("/trap/loop"):]
+            if not subpath:
+                subpath = "/a/b"
+            body = f"""<html><body><h1>Path Loop Trap</h1>
+            <a href="/trap/loop{subpath}{subpath}">Deeper Loop</a>
+            </body></html>"""
+            self._send_html(200, body)
+
+        elif path == "/trap/query":
+            import random
+            rand_val = random.randint(100000, 999999)
+            body = f"""<html><body><h1>Random Query Trap</h1>
+            <a href="/trap/query?token={rand_val}">Next Random Token</a>
+            </body></html>"""
+            self._send_html(200, body)
+
+        elif path.startswith("/trap/session"):
+            import random
+            rand_sid = random.randint(10000, 99999)
+            body = f"""<html><body><h1>Session ID Trap</h1>
+            <a href="/trap/session;jsessionid={rand_sid}/page">Java Session Link</a>
+            <a href="/trap/session/(S({rand_sid}xyz))/page">ASP Session Link</a>
+            </body></html>"""
+            self._send_html(200, body)
+
+        elif path == "/trap/pagination":
+            page_val = int(query.get("page", "1"))
+            next_page = page_val + 1
+            body = f"""<html><body><h1>Infinite Pagination Page {page_val}</h1>
+            <a href="/trap/pagination?page={next_page}">Next Page {next_page}</a>
+            </body></html>"""
+            self._send_html(200, body)
+
+        elif path.startswith("/trap/soft-404"):
+            # Returns 200 OK with identical content for every ID
+            body = "<html><body><h1>Page Not Found</h1><p>The requested article does not exist or has been removed.</p></body></html>"
+            self._send_html(200, body)
+
+        elif path.startswith("/budget/bytes/"):
+            try:
+                kb = int(path.split("/")[-1])
+            except ValueError:
+                kb = 10
+            payload = "x" * (kb * 1024)
+            self._send_html(200, f"<html><body><h1>Bytes Payload {kb}KB</h1><div>{payload}</div></body></html>")
+
+        elif path.startswith("/budget/slow/"):
+            time.sleep(0.15)
+            self._send_html(200, "<html><body><h1>Slow Page</h1><p>Delayed page response.</p></body></html>")
+
         else:
             self._send_text(404, f"404 Not Found: {path}", "text/plain")
 
@@ -548,6 +630,8 @@ class ControlledCrawlerServer:
         if self.server:
             setattr(self.server, "_429_hits", 0)
             setattr(self.server, "_transient_fails", 0)
+            setattr(self.server, "robots_status_code", 200)
+            setattr(self.server, "robots_content", "User-agent: *\nAllow: /\nDisallow: /blocked\n")
 
     def reset_concurrency_stats(self) -> None:
         if self.server:

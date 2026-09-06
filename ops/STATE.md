@@ -7,38 +7,41 @@
 ---
 
 ## 1. Active Phase & Subphase
-- **Active Phase**: PHASE 2 (Crawler Core) — **COMPLETED & CERTIFIED**
+- **Active Phase**: PHASE 2 (Crawler Core) — **PHASE 2F COMPLETED & CERTIFIED**
 - **Completed Subphases**:
   - Phase 2A (Crawler Contracts + State Model) — **PASSED**
   - Phase 2B (URL Normalization + Frontier + Crawl Lifecycle) — **PASSED**
   - Phase 2C (Four Independent Crawler Engines) — **PASSED & CERTIFIED**
   - Phase 2D (Concurrency Stress, Failure Injection & Resource Safety) — **PASSED & CERTIFIED**
   - Phase 2E (Static Fetch + Playwright + Smart Escalation) — **PASSED & CERTIFIED**
+  - Phase 2F (Robots, Politeness, Retries & Crawl Budgets) — **PASSED & CERTIFIED**
 - **Baseline Git Checkpoints**:
   - `db7fc50` (Tags: `phase-1-certified`, `pre-phase-2-crawler-core`)
   - `fdd59d9` (Tag: `phase-2c-engine-independence`)
   - `phase-2d-concurrency-hardening`
-  - Target commit for Phase 2E (Tag: `phase-2e-fetch-strategy`)
+  - `phase-2e-fetch-strategy`
+  - Target commit for Phase 2F (Tag: `phase-2f-budgets-politeness`)
 - **Phase 1 Evaluation Baseline**: **FROZEN & TRUSTED** (Do NOT modify Phase 1 fixtures)
 
 ---
 
 ## 2. Current Objective
-Phase 2 (Crawler Core) is completely certified across all 5 subphases (2A, 2B, 2C, 2D, 2E).
-Next: Present full Phase 2 certification evidence to the user, commit changes, tag `phase-2e-fetch-strategy`, and await instructions for Phase 3 (Universal Extraction).
+Phase 2F (Robots, Politeness, Retries & Crawl Budgets) is completely certified across all 4 crawler engines and all test suites.
+Next: Present full Phase 2F certification evidence to the user, commit changes, tag `phase-2f-budgets-politeness`, and await instructions for Phase 2G (Authentication, Sessions & State Handling).
 
 ---
 
 ## 3. Current Status
 - **Phase 0 Status**: `PASSED`
 - **Phase 1 Status**: `PASSED & CERTIFIED (FROZEN)`
-- **Phase 2 Status**: `PASSED & CERTIFIED`
+- **Phase 2 Status**: `PHASE 2F CERTIFIED`
   - **Subphase 2A Status**: `PASSED`
   - **Subphase 2B Status**: `PASSED`
   - **Subphase 2C Status**: `PASSED & CERTIFIED`
   - **Subphase 2D Status**: `PASSED & CERTIFIED`
   - **Subphase 2E Status**: `PASSED & CERTIFIED`
-- **Current Test State**: 306 Passed, 2 Skipped (due to optional `sentence-transformers`), 0 Failed across 39 test modules.
+  - **Subphase 2F Status**: `PASSED & CERTIFIED`
+- **Current Test State**: 341 Passed, 2 Skipped (due to optional `sentence-transformers`), 0 Failed across 42 test modules.
 
 ---
 

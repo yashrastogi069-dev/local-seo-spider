@@ -262,6 +262,21 @@ class PageRecord:
 
 
 @dataclass
+class CrawlBudget:
+    """Crawl budget constraints to bound crawl operations."""
+
+    max_pages: int | None = None
+    max_depth: int | None = None
+    max_bytes: int | None = None  # Cumulative response body bytes cap
+    max_duration_seconds: float | None = None  # Crawl wall-clock deadline
+    max_retries: int = 3
+    redirect_limit: int = 10
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class CrawlResult:
     """Rich crawl execution summary preserving observability invariants.
 
@@ -289,6 +304,7 @@ class CrawlResult:
     pages_escalated: int = 0
     duplicates_count: int = 0
     retry_count: int = 0
+    total_response_bytes: int = 0
     errors: list[str] = field(default_factory=list)
     pages: list[PageRecord] = field(default_factory=list)
     links: list[LinkRecord] = field(default_factory=list)
@@ -333,6 +349,7 @@ class CrawlResult:
             "pages_escalated": self.pages_escalated,
             "duplicates_count": self.duplicates_count,
             "retry_count": self.retry_count,
+            "total_response_bytes": self.total_response_bytes,
             "errors": list(self.errors),
             "pages": [p.to_dict() for p in self.pages],
             "links": [link.to_dict() for link in self.links],
@@ -370,6 +387,9 @@ class CrawlRequest:
     crawl_id: str = ""
     max_depth: int = 10
     fetch_mode: str = "static"
+    budget: CrawlBudget | None = None
+    respect_robots_txt: bool = True
+    per_host_concurrency: int | None = None
 
     def public_settings(self) -> dict[str, Any]:
         return {
@@ -384,6 +404,9 @@ class CrawlRequest:
             "crawl_id": self.crawl_id,
             "max_depth": self.max_depth,
             "fetch_mode": self.fetch_mode,
+            "budget": self.budget.to_dict() if self.budget else None,
+            "respect_robots_txt": self.respect_robots_txt,
+            "per_host_concurrency": self.per_host_concurrency,
         }
 
     def storage_payload(self) -> dict[str, Any]:
@@ -392,6 +415,8 @@ class CrawlRequest:
 
     @classmethod
     def from_storage_payload(cls, payload: dict[str, Any]) -> "CrawlRequest":
+        budget_payload = payload.get("budget")
+        budget = CrawlBudget(**budget_payload) if isinstance(budget_payload, dict) else None
         return cls(
             start_url=str(payload["start_url"]),
             mode=str(payload["mode"]),
@@ -406,6 +431,9 @@ class CrawlRequest:
             crawl_id=str(payload.get("crawl_id", "")),
             max_depth=int(payload.get("max_depth", 10)),
             fetch_mode=str(payload.get("fetch_mode", "static")),
+            budget=budget,
+            respect_robots_txt=bool(payload.get("respect_robots_txt", True)),
+            per_host_concurrency=payload.get("per_host_concurrency"),
         )
 
 

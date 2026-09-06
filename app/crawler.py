@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 from concurrent.futures.process import BrokenProcessPool
+from contextlib import asynccontextmanager, contextmanager
 import multiprocessing
 import os
+import random
 import threading
 import time
 from collections import deque
@@ -32,6 +34,7 @@ from app.parser import extract_api_entry_points, extract_links, extract_page_sig
 from app.types import (
     CancellationToken,
     CrawlerEngineProtocol,
+    CrawlBudget,
     CrawlRequest,
     CrawlResult,
     CrawlStatus,
@@ -53,59 +56,160 @@ from app.urltools import (
 _PRESERVE_SLASH_POLICY = UrlNormalizationPolicy(trailing_slash="preserve")
 
 
+def extract_crawl_delay(lines: list[str], user_agent: str = "*") -> float | None:
+    """Parse Crawl-delay from robots.txt lines respecting user-agent specificity and float delays."""
+    current_agents: list[str] = []
+    agent_delays: dict[str, float] = {}
+    in_rules = False
+    for raw_line in lines:
+        line = raw_line.split("#")[0].strip()
+        if not line:
+            current_agents = []
+            in_rules = False
+            continue
+        parts = line.split(":", 1)
+        if len(parts) == 2:
+            directive = parts[0].strip().lower()
+            val = parts[1].strip()
+            if directive == "user-agent":
+                if in_rules:
+                    current_agents = []
+                    in_rules = False
+                current_agents.append(val.lower())
+            elif directive == "crawl-delay" and current_agents:
+                in_rules = True
+                try:
+                    delay_val = float(val)
+                    for a in current_agents:
+                        agent_delays[a] = delay_val
+                except ValueError:
+                    pass
+            elif directive in ("allow", "disallow"):
+                in_rules = True
+
+    ua_lower = user_agent.lower()
+    if ua_lower in agent_delays:
+        return agent_delays[ua_lower]
+    for k, v in agent_delays.items():
+        if k != "*" and (k in ua_lower or ua_lower.startswith(k)):
+            return v
+    return agent_delays.get("*")
+
+
 class DomainPolitenessThrottler:
-    """Thread-safe per-domain politeness coordinator."""
+    """Thread-safe per-domain politeness and concurrency coordinator."""
 
-    def __init__(self, delay_seconds: float) -> None:
-        self.delay_seconds = delay_seconds
+    def __init__(self, delay_seconds: float, per_host_concurrency: int = 1) -> None:
+        self.delay_seconds = max(0.0, delay_seconds)
+        self.per_host_concurrency = max(1, per_host_concurrency)
         self._meta_lock = threading.Lock()
-        self._domain_locks: dict[str, threading.Lock] = {}
-        self._last_request_time: dict[str, float] = {}
+        self._domain_semaphores: dict[str, threading.BoundedSemaphore] = {}
+        self._domain_delays: dict[str, float] = {}
+        self._last_completed_time: dict[str, float] = {}
 
-    def _get_domain_lock(self, domain: str) -> threading.Lock:
+    def set_domain_delay(self, domain: str, delay: float) -> None:
+        dom_clean = domain.lower().strip()
+        host_only = dom_clean.split(":")[0]
         with self._meta_lock:
-            if domain not in self._domain_locks:
-                self._domain_locks[domain] = threading.Lock()
-            return self._domain_locks[domain]
+            self._domain_delays[dom_clean] = max(0.0, delay)
+            self._domain_delays[host_only] = max(0.0, delay)
 
-    def throttle(self, url: str) -> None:
-        if self.delay_seconds <= 0:
-            return
+    def record_completion(self, url: str) -> None:
         domain = (urlsplit(url).netloc or "").lower()
-        domain_lock = self._get_domain_lock(domain)
-        with domain_lock:
+        host = (urlsplit(url).hostname or "").lower()
+        now = time.monotonic()
+        with self._meta_lock:
+            self._last_completed_time[domain] = now
+            if host:
+                self._last_completed_time[host] = now
+
+    def _get_domain_semaphore(self, domain: str) -> threading.BoundedSemaphore:
+        with self._meta_lock:
+            if domain not in self._domain_semaphores:
+                self._domain_semaphores[domain] = threading.BoundedSemaphore(self.per_host_concurrency)
+            return self._domain_semaphores[domain]
+
+    @contextmanager
+    def acquire(self, url: str):
+        domain = (urlsplit(url).netloc or "").lower()
+        host = (urlsplit(url).hostname or "").lower()
+        sem = self._get_domain_semaphore(domain)
+        sem.acquire()
+        try:
             with self._meta_lock:
-                last_time = self._last_request_time.get(domain, 0.0)
+                last_time = max(self._last_completed_time.get(domain, 0.0), self._last_completed_time.get(host, 0.0))
+                req_delay = max(self.delay_seconds, self._domain_delays.get(domain, 0.0), self._domain_delays.get(host, 0.0))
             now = time.monotonic()
-            pause = self.delay_seconds - (now - last_time)
+            pause = req_delay - (now - last_time)
             if pause > 0:
                 time.sleep(pause)
+            yield
+        finally:
+            now = time.monotonic()
             with self._meta_lock:
-                self._last_request_time[domain] = time.monotonic()
+                self._last_completed_time[domain] = now
+                if host:
+                    self._last_completed_time[host] = now
+            sem.release()
+
+    def throttle(self, url: str) -> None:
+        with self.acquire(url):
+            pass
 
 
 class AsyncDomainPolitenessThrottler:
-    """Async per-domain politeness coordinator."""
+    """Async per-domain politeness and concurrency coordinator."""
 
-    def __init__(self, delay_seconds: float) -> None:
-        self.delay_seconds = delay_seconds
-        self._domain_locks: dict[str, asyncio.Lock] = {}
-        self._last_request_time: dict[str, float] = {}
+    def __init__(self, delay_seconds: float, per_host_concurrency: int = 1) -> None:
+        self.delay_seconds = max(0.0, delay_seconds)
+        self.per_host_concurrency = max(1, per_host_concurrency)
+        self._domain_semaphores: dict[str, asyncio.Semaphore] = {}
+        self._domain_delays: dict[str, float] = {}
+        self._last_completed_time: dict[str, float] = {}
 
-    async def throttle(self, url: str) -> None:
-        if self.delay_seconds <= 0:
-            return
+    def set_domain_delay(self, domain: str, delay: float) -> None:
+        dom_clean = domain.lower().strip()
+        host_only = dom_clean.split(":")[0]
+        self._domain_delays[dom_clean] = max(0.0, delay)
+        self._domain_delays[host_only] = max(0.0, delay)
+
+    def record_completion(self, url: str) -> None:
         domain = (urlsplit(url).netloc or "").lower()
-        if domain not in self._domain_locks:
-            self._domain_locks[domain] = asyncio.Lock()
+        host = (urlsplit(url).hostname or "").lower()
+        now = time.monotonic()
+        self._last_completed_time[domain] = now
+        if host:
+            self._last_completed_time[host] = now
 
-        async with self._domain_locks[domain]:
+    def _get_domain_semaphore(self, domain: str) -> asyncio.Semaphore:
+        if domain not in self._domain_semaphores:
+            self._domain_semaphores[domain] = asyncio.Semaphore(self.per_host_concurrency)
+        return self._domain_semaphores[domain]
+
+    @asynccontextmanager
+    async def acquire(self, url: str):
+        domain = (urlsplit(url).netloc or "").lower()
+        host = (urlsplit(url).hostname or "").lower()
+        sem = self._get_domain_semaphore(domain)
+        await sem.acquire()
+        try:
+            last_time = max(self._last_completed_time.get(domain, 0.0), self._last_completed_time.get(host, 0.0))
+            req_delay = max(self.delay_seconds, self._domain_delays.get(domain, 0.0), self._domain_delays.get(host, 0.0))
             now = time.monotonic()
-            last_time = self._last_request_time.get(domain, 0.0)
-            pause = self.delay_seconds - (now - last_time)
+            pause = req_delay - (now - last_time)
             if pause > 0:
                 await asyncio.sleep(pause)
-            self._last_request_time[domain] = time.monotonic()
+            yield
+        finally:
+            now = time.monotonic()
+            self._last_completed_time[domain] = now
+            if host:
+                self._last_completed_time[host] = now
+            sem.release()
+
+    async def throttle(self, url: str) -> None:
+        async with self.acquire(url):
+            pass
 
 
 class BaseCrawlerEngine:
@@ -114,6 +218,8 @@ class BaseCrawlerEngine:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.extraction_profile = load_profile(settings.extraction_profile_path)
+        self._robots_cache: dict[str, tuple[robotparser.RobotFileParser, str]] = {}
+        self._async_robots_cache: dict[str, tuple[robotparser.RobotFileParser, str]] = {}
 
     @staticmethod
     def _now() -> str:
@@ -133,41 +239,138 @@ class BaseCrawlerEngine:
             "links": [],
         }
 
-    def _robots(self, client: httpx.Client, start_url: str) -> tuple[robotparser.RobotFileParser, str]:
-        parsed = httpx.URL(start_url)
-        robots_url = str(parsed.copy_with(path="/robots.txt", query=None, fragment=None))
+    def _robots(
+        self,
+        client: httpx.Client,
+        start_url: str,
+        respect_robots: bool = True,
+        throttler: DomainPolitenessThrottler | None = None,
+    ) -> tuple[robotparser.RobotFileParser, str]:
         policy = robotparser.RobotFileParser()
+        if not respect_robots:
+            policy.allow_all = True
+            return policy, "disabled_by_configuration"
+
+        parsed = httpx.URL(start_url)
+        origin_key = f"{parsed.scheme}://{parsed.netloc.decode('ascii') if isinstance(parsed.netloc, bytes) else parsed.netloc}"
+        if origin_key in self._robots_cache:
+            return self._robots_cache[origin_key]
+
+        robots_url = f"{origin_key}/robots.txt"
         policy.set_url(robots_url)
         try:
             response = client.get(robots_url, follow_redirects=True)
             if response.status_code == 200:
-                policy.parse(response.text.splitlines())
-                return policy, "loaded"
-            policy.allow_all = True
-            return policy, f"unavailable (HTTP {response.status_code})"
+                lines = response.text.splitlines()
+                policy.parse(lines)
+                crawl_delay = extract_crawl_delay(lines, self.settings.user_agent)
+                if crawl_delay is not None and throttler:
+                    throttler.set_domain_delay(parsed.host, crawl_delay)
+                res = (policy, "loaded")
+            elif response.status_code >= 500:
+                # RFC 9309 section 3.3.1: Server errors MUST be treated as temporarily disallowed / fail-closed
+                policy.disallow_all = True
+                res = (policy, f"unavailable (HTTP {response.status_code} - fail-closed RFC 9309)")
+            elif response.status_code == 429:
+                policy.disallow_all = True
+                res = (policy, "rate_limited (HTTP 429 - fail-closed RFC 9309)")
+            else:
+                # 4xx (e.g. 404): RFC 9309 section 3.3.1: allow all
+                policy.allow_all = True
+                res = (policy, f"unavailable (HTTP {response.status_code} - allow-all)")
         except httpx.HTTPError as exc:
             policy.allow_all = True
-            return policy, f"unavailable ({type(exc).__name__})"
+            res = (policy, f"unavailable ({type(exc).__name__})")
 
-    async def _async_robots(self, client: httpx.AsyncClient, start_url: str) -> tuple[robotparser.RobotFileParser, str]:
-        parsed = httpx.URL(start_url)
-        robots_url = str(parsed.copy_with(path="/robots.txt", query=None, fragment=None))
+        self._robots_cache[origin_key] = res
+        return res
+
+    def _safe_robots(
+        self,
+        client: httpx.Client,
+        url: str,
+        respect_robots: bool = True,
+        throttler: DomainPolitenessThrottler | None = None,
+    ) -> tuple[robotparser.RobotFileParser, str]:
+        """Invoke _robots safely accommodating tests that monkeypatch _robots with 2 arguments."""
+        import inspect
+        sig = inspect.signature(self._robots)
+        params = list(sig.parameters.values())
+        if len(params) >= 4 or any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+            return self._robots(client, url, respect_robots, throttler)
+        elif len(params) == 3:
+            return self._robots(client, url, respect_robots)
+        else:
+            return self._robots(client, url)
+
+    async def _async_robots(
+        self,
+        client: httpx.AsyncClient,
+        start_url: str,
+        respect_robots: bool = True,
+        throttler: AsyncDomainPolitenessThrottler | None = None,
+    ) -> tuple[robotparser.RobotFileParser, str]:
         policy = robotparser.RobotFileParser()
+        if not respect_robots:
+            policy.allow_all = True
+            return policy, "disabled_by_configuration"
+
+        parsed = httpx.URL(start_url)
+        origin_key = f"{parsed.scheme}://{parsed.netloc.decode('ascii') if isinstance(parsed.netloc, bytes) else parsed.netloc}"
+        if origin_key in self._async_robots_cache:
+            return self._async_robots_cache[origin_key]
+
+        robots_url = f"{origin_key}/robots.txt"
         policy.set_url(robots_url)
         try:
             response = await client.get(robots_url, follow_redirects=True)
             if response.status_code == 200:
-                policy.parse(response.text.splitlines())
-                return policy, "loaded"
-            policy.allow_all = True
-            return policy, f"unavailable (HTTP {response.status_code})"
+                lines = response.text.splitlines()
+                policy.parse(lines)
+                crawl_delay = extract_crawl_delay(lines, self.settings.user_agent)
+                if crawl_delay is not None and throttler:
+                    throttler.set_domain_delay(parsed.host, crawl_delay)
+                res = (policy, "loaded")
+            elif response.status_code >= 500:
+                # RFC 9309 section 3.3.1: Server errors MUST be treated as temporarily disallowed / fail-closed
+                policy.disallow_all = True
+                res = (policy, f"unavailable (HTTP {response.status_code} - fail-closed RFC 9309)")
+            elif response.status_code == 429:
+                policy.disallow_all = True
+                res = (policy, "rate_limited (HTTP 429 - fail-closed RFC 9309)")
+            else:
+                # 4xx (e.g. 404): RFC 9309 section 3.3.1: allow all
+                policy.allow_all = True
+                res = (policy, f"unavailable (HTTP {response.status_code} - allow-all)")
         except httpx.HTTPError as exc:
             policy.allow_all = True
-            return policy, f"unavailable ({type(exc).__name__})"
+            res = (policy, f"unavailable ({type(exc).__name__})")
+
+        self._async_robots_cache[origin_key] = res
+        return res
+
+    async def _safe_async_robots(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        respect_robots: bool = True,
+        throttler: AsyncDomainPolitenessThrottler | None = None,
+    ) -> tuple[robotparser.RobotFileParser, str]:
+        """Invoke _async_robots safely accommodating monkeypatched 2-arg implementations."""
+        import inspect
+        sig = inspect.signature(self._async_robots)
+        params = list(sig.parameters.values())
+        if len(params) >= 4 or any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+            return await self._async_robots(client, url, respect_robots, throttler)
+        elif len(params) == 3:
+            return await self._async_robots(client, url, respect_robots)
+        else:
+            return await self._async_robots(client, url)
 
     @staticmethod
     def _retry_delay(response: httpx.Response, attempt: int, base_seconds: float) -> float:
-        delay = base_seconds * (2 ** attempt)
+        jitter = random.uniform(0.8, 1.2)
+        delay = base_seconds * (2 ** attempt) * jitter
         value = response.headers.get("retry-after", "").strip()
         if value:
             try:
@@ -211,24 +414,29 @@ class BaseCrawlerEngine:
         client: httpx.Client,
         url: str,
         cancellation_token: CancellationToken | None = None,
+        max_retries: int | None = None,
+        max_redirects: int | None = None,
     ) -> tuple[httpx.Response | None, list[dict[str, object]], str]:
         current = url
         hops: list[dict[str, object]] = []
         transient_statuses = {408, 425, 429, 500, 502, 503, 504}
+        effective_redirects = max_redirects if max_redirects is not None else self.settings.max_redirects
+        effective_retries = max_retries if max_retries is not None else self.settings.max_request_retries
         response: httpx.Response | None = None
-        for _ in range(self.settings.max_redirects + 1):
+        for _ in range(effective_redirects + 1):
             if cancellation_token and cancellation_token.is_cancelled():
                 return None, hops, f"Request cancelled: {cancellation_token.reason or 'User cancelled'}"
             response = None
-            for attempt in range(self.settings.max_request_retries + 1):
+            for attempt in range(effective_retries + 1):
                 if cancellation_token and cancellation_token.is_cancelled():
                     return None, hops, f"Request cancelled: {cancellation_token.reason or 'User cancelled'}"
                 try:
                     response = client.get(current, follow_redirects=False)
                 except httpx.HTTPError as exc:
-                    if attempt >= self.settings.max_request_retries:
+                    if attempt >= effective_retries:
                         return None, hops, f"{type(exc).__name__} after {attempt + 1} attempt(s): {exc}"
-                    self._sleep_interruptible(self.settings.retry_backoff_seconds * (2 ** attempt), cancellation_token)
+                    jitter = random.uniform(0.8, 1.2)
+                    self._sleep_interruptible(self.settings.retry_backoff_seconds * (2 ** attempt) * jitter, cancellation_token)
                     continue
                 hops.append({
                     "url": current,
@@ -236,7 +444,7 @@ class BaseCrawlerEngine:
                     "location": response.headers.get("location", ""),
                     "attempt": attempt + 1,
                 })
-                if response.status_code in transient_statuses and attempt < self.settings.max_request_retries:
+                if response.status_code in transient_statuses and attempt < effective_retries:
                     self._sleep_interruptible(self._retry_delay(response, attempt, self.settings.retry_backoff_seconds), cancellation_token)
                     continue
                 break
@@ -254,33 +462,38 @@ class BaseCrawlerEngine:
                     return response, hops, "Redirect location could not be normalized."
                 continue
             if response.status_code in transient_statuses:
-                return response, hops, f"Transient HTTP status {response.status_code} remained after {self.settings.max_request_retries + 1} attempt(s)."
+                return response, hops, f"Transient HTTP status {response.status_code} remained after {effective_retries + 1} attempt(s)."
             return response, hops, ""
-        return response, hops, f"Redirect limit ({self.settings.max_redirects}) exceeded."
+        return response, hops, f"Redirect limit ({effective_redirects}) exceeded."
 
     async def _async_fetch(
         self,
         client: httpx.AsyncClient,
         url: str,
         cancellation_token: CancellationToken | None = None,
+        max_retries: int | None = None,
+        max_redirects: int | None = None,
     ) -> tuple[httpx.Response | None, list[dict[str, object]], str]:
         current = url
         hops: list[dict[str, object]] = []
         transient_statuses = {408, 425, 429, 500, 502, 503, 504}
+        effective_redirects = max_redirects if max_redirects is not None else self.settings.max_redirects
+        effective_retries = max_retries if max_retries is not None else self.settings.max_request_retries
         response: httpx.Response | None = None
-        for _ in range(self.settings.max_redirects + 1):
+        for _ in range(effective_redirects + 1):
             if cancellation_token and cancellation_token.is_cancelled():
                 return None, hops, f"Request cancelled: {cancellation_token.reason or 'User cancelled'}"
             response = None
-            for attempt in range(self.settings.max_request_retries + 1):
+            for attempt in range(effective_retries + 1):
                 if cancellation_token and cancellation_token.is_cancelled():
                     return None, hops, f"Request cancelled: {cancellation_token.reason or 'User cancelled'}"
                 try:
                     response = await client.get(current, follow_redirects=False)
                 except httpx.HTTPError as exc:
-                    if attempt >= self.settings.max_request_retries:
+                    if attempt >= effective_retries:
                         return None, hops, f"{type(exc).__name__} after {attempt + 1} attempt(s): {exc}"
-                    await self._async_sleep_interruptible(self.settings.retry_backoff_seconds * (2 ** attempt), cancellation_token)
+                    jitter = random.uniform(0.8, 1.2)
+                    await self._async_sleep_interruptible(self.settings.retry_backoff_seconds * (2 ** attempt) * jitter, cancellation_token)
                     continue
                 hops.append({
                     "url": current,
@@ -288,7 +501,7 @@ class BaseCrawlerEngine:
                     "location": response.headers.get("location", ""),
                     "attempt": attempt + 1,
                 })
-                if response.status_code in transient_statuses and attempt < self.settings.max_request_retries:
+                if response.status_code in transient_statuses and attempt < effective_retries:
                     await self._async_sleep_interruptible(self._retry_delay(response, attempt, self.settings.retry_backoff_seconds), cancellation_token)
                     continue
                 break
@@ -306,20 +519,27 @@ class BaseCrawlerEngine:
                     return response, hops, "Redirect location could not be normalized."
                 continue
             if response.status_code in transient_statuses:
-                return response, hops, f"Transient HTTP status {response.status_code} remained after {self.settings.max_request_retries + 1} attempt(s)."
+                return response, hops, f"Transient HTTP status {response.status_code} remained after {effective_retries + 1} attempt(s)."
             return response, hops, ""
-        return response, hops, f"Redirect limit ({self.settings.max_redirects}) exceeded."
+        return response, hops, f"Redirect limit ({effective_redirects}) exceeded."
 
     def _safe_fetch(
         self,
         client: httpx.Client,
         url: str,
         cancellation_token: CancellationToken | None = None,
+        max_retries: int | None = None,
+        max_redirects: int | None = None,
     ) -> tuple[httpx.Response | None, list[dict[str, object]], str]:
-        """Invoke _fetch handling both 3-arg (cancellation-aware) and legacy 2-arg monkeypatched fakes."""
+        """Invoke _fetch handling cancellation-aware and legacy monkeypatched fakes."""
         import inspect
         sig = inspect.signature(self._fetch)
         params = list(sig.parameters.values())
+        if len(params) >= 5 or any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+            try:
+                return self._fetch(client, url, cancellation_token, max_retries, max_redirects)
+            except TypeError:
+                pass
         if len(params) >= 3 or any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
             try:
                 return self._fetch(client, url, cancellation_token)
@@ -332,11 +552,18 @@ class BaseCrawlerEngine:
         client: httpx.AsyncClient,
         url: str,
         cancellation_token: CancellationToken | None = None,
+        max_retries: int | None = None,
+        max_redirects: int | None = None,
     ) -> tuple[httpx.Response | None, list[dict[str, object]], str]:
-        """Invoke _async_fetch handling both 3-arg and legacy 2-arg monkeypatched fakes."""
+        """Invoke _async_fetch handling cancellation-aware and legacy monkeypatched fakes."""
         import inspect
         sig = inspect.signature(self._async_fetch)
         params = list(sig.parameters.values())
+        if len(params) >= 5 or any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
+            try:
+                return await self._async_fetch(client, url, cancellation_token, max_retries, max_redirects)
+            except TypeError:
+                pass
         if len(params) >= 3 or any(p.kind == inspect.Parameter.VAR_POSITIONAL for p in params):
             try:
                 return await self._async_fetch(client, url, cancellation_token)
@@ -626,9 +853,12 @@ class BaseCrawlerEngine:
         if is_dup:
             frontier.mark_duplicate(page.url, dup_of)
         elif page.status_code and page.status_code >= 400:
-            frontier.mark_failed(page.url, f"HTTP {page.status_code}", is_retryable=False)
+            is_transient = page.status_code in {408, 425, 429, 500, 502, 503, 504}
+            frontier.mark_failed(page.url, f"HTTP {page.status_code}", is_retryable=is_transient)
         elif page.fetch_error:
-            frontier.mark_failed(page.url, page.fetch_error, is_retryable=False)
+            err_lower = page.fetch_error.lower()
+            is_transient = any(t in err_lower for t in ["timeout", "connecterror", "networkerror", "remoteprotocolerror", "timed out"])
+            frontier.mark_failed(page.url, page.fetch_error, is_retryable=is_transient)
         else:
             frontier.mark_completed(page.url, status_code=page.status_code or 200)
 
@@ -649,8 +879,12 @@ class BaseCrawlerEngine:
         started_at: str,
         cancellation_token: CancellationToken | None,
         fatal_error: str = "",
+        termination_budget_reason: str = "",
+        total_response_bytes: int = 0,
+        retries_performed: int = 0,
     ) -> CrawlResult:
-        pages_to_return = pages[: request.max_urls]
+        effective_limit = request.budget.max_pages if (request.budget and request.budget.max_pages is not None) else request.max_urls
+        pages_to_return = pages[: effective_limit]
         finished_at = self._now()
         duration_ms = (time.monotonic() - start_time) * 1000.0
         pages_succeeded = sum(1 for p in pages_to_return if p.status_code and p.status_code < 400 and p.robots_allowed and not p.fetch_error)
@@ -682,6 +916,9 @@ class BaseCrawlerEngine:
         elif cancelled:
             status = CrawlStatus.CANCELLED.value
             termination_reason = f"cancelled: {cancellation_token.reason or 'Cooperative cancellation requested'}"
+        elif termination_budget_reason:
+            status = CrawlStatus.BUDGET_EXHAUSTED.value
+            termination_reason = termination_budget_reason
         elif pages_failed > 0:
             status = CrawlStatus.PARTIAL.value if pages_succeeded > 0 else CrawlStatus.FAILED.value
             termination_reason = "max_urls_reached" if len(pages) >= request.max_urls else "queue_empty"
@@ -695,6 +932,8 @@ class BaseCrawlerEngine:
             errors.append(fatal_error)
 
         pages_escalated = sum(1 for p in pages_to_return if getattr(p, "escalated", False))
+        calc_retries = max(accounting.get("retries", 0), retries_performed)
+        calc_bytes = total_response_bytes if total_response_bytes > 0 else sum(getattr(p, "response_bytes", 0) for p in pages_to_return)
 
         return CrawlResult(
             crawl_id=getattr(request, "crawl_id", ""),
@@ -715,7 +954,8 @@ class BaseCrawlerEngine:
             pages_failed=pages_failed,
             pages_skipped=accounting.get("skipped", 0),
             duplicates_count=sum(1 for p in pages_to_return if p.is_duplicate),
-            retry_count=0,
+            retry_count=calc_retries,
+            total_response_bytes=calc_bytes,
             errors=errors,
             pages=pages_to_return,
             links=links,
@@ -770,14 +1010,27 @@ class CrawlEngine(BaseCrawlerEngine):
     ) -> CrawlResult:
         start_time = time.monotonic()
         started_at = self._now()
+        budget = request.budget
+        effective_max_pages = budget.max_pages if (budget and budget.max_pages is not None) else request.max_urls
+        effective_max_depth = budget.max_depth if (budget and budget.max_depth is not None) else getattr(request, "max_depth", 10)
+        effective_max_bytes = budget.max_bytes if (budget and budget.max_bytes is not None) else None
+        effective_max_duration = budget.max_duration_seconds if (budget and budget.max_duration_seconds is not None) else None
+        effective_max_retries = budget.max_retries if (budget and budget.max_retries is not None) else self.settings.max_request_retries
+        effective_max_redirects = budget.redirect_limit if (budget and budget.redirect_limit is not None) else self.settings.max_redirects
+        deadline = (start_time + effective_max_duration) if effective_max_duration is not None else None
+
+        total_response_bytes = 0
+        retries_performed = 0
+        termination_budget_reason = ""
+
         frontier = CrawlFrontier(
             start_url=request.start_url,
-            max_urls=request.max_urls,
-            max_depth=getattr(request, "max_depth", 10),
+            max_urls=effective_max_pages,
+            max_depth=effective_max_depth,
             mode=request.mode,
             url_list=request.url_list,
             allow_private=getattr(self.settings, "allow_private_crawls", False),
-            max_retries=self.settings.max_request_retries,
+            max_retries=effective_max_retries,
             retry_backoff_seconds=self.settings.retry_backoff_seconds,
         )
         pages: list[PageRecord] = []
@@ -785,7 +1038,7 @@ class CrawlEngine(BaseCrawlerEngine):
         seen_content_hashes: dict[str, str] = {}
         seen_canonicals: dict[str, str] = {}
         pagination_counts: dict[str, int] = {}
-        last_request_at = 0.0
+        throttler = DomainPolitenessThrottler(request.delay_seconds, per_host_concurrency=1)
 
         headers = {
             "User-Agent": self.settings.user_agent,
@@ -815,11 +1068,18 @@ class CrawlEngine(BaseCrawlerEngine):
                     pass
 
         with httpx.Client(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
-            robots, robots_status = self._robots(client, request.start_url)
+            robots, robots_status = self._safe_robots(client, request.start_url, respect_robots=request.respect_robots_txt, throttler=throttler)
 
             try:
-                while not frontier.is_complete() and len(pages) < request.max_urls:
+                while not frontier.is_complete() and len(pages) < effective_max_pages:
                     if cancellation_token and cancellation_token.is_cancelled():
+                        break
+                    if deadline and time.monotonic() >= deadline:
+                        elapsed = time.monotonic() - start_time
+                        termination_budget_reason = f"budget_exhausted: max_crawl_duration exceeded ({elapsed:.2f}s >= {effective_max_duration}s)"
+                        break
+                    if effective_max_bytes and total_response_bytes >= effective_max_bytes:
+                        termination_budget_reason = f"budget_exhausted: max_bytes reached ({total_response_bytes} >= {effective_max_bytes})"
                         break
                     entry = frontier.get_next()
                     if entry is None:
@@ -832,25 +1092,31 @@ class CrawlEngine(BaseCrawlerEngine):
                     depth = entry.depth
                     parent_url = entry.parent_url
 
-                    if not robots.can_fetch(self.settings.user_agent, url):
-                        frontier.mark_skipped(url, reason="robots_disallowed")
-                        pages.append(self._error_page(
-                            url, [], "robots_disallowed", "serial",
-                            depth=depth, parent_url=parent_url,
-                            requested_fetch_strategy=requested_fetch_mode,
-                            actual_fetch_strategy="static",
-                        ))
-                        progress(len(pages), frontier.queue_size, robots_status)
-                        continue
+                    if request.respect_robots_txt:
+                        robots, robots_status = self._safe_robots(client, url, respect_robots=True, throttler=throttler)
+                        if not robots.can_fetch(self.settings.user_agent, url):
+                            frontier.mark_skipped(url, reason="robots_disallowed")
+                            pages.append(self._error_page(
+                                url, [], "robots_disallowed", "serial",
+                                depth=depth, parent_url=parent_url,
+                                requested_fetch_strategy=requested_fetch_mode,
+                                actual_fetch_strategy="static",
+                            ))
+                            progress(len(pages), frontier.queue_size, robots_status)
+                            continue
 
-                    pause = request.delay_seconds - (time.monotonic() - last_request_at)
-                    if pause > 0:
-                        self._sleep_interruptible(pause, cancellation_token)
+                    throttler.throttle(url)
 
                     t_start = time.monotonic()
-                    response, redirect_chain, fetch_error = self._safe_fetch(client, url, cancellation_token)
+                    response, redirect_chain, fetch_error = self._safe_fetch(
+                        client, url, cancellation_token,
+                        max_retries=effective_max_retries,
+                        max_redirects=effective_max_redirects,
+                    )
                     fetch_duration_ms = (time.monotonic() - t_start) * 1000.0
-                    last_request_at = time.monotonic()
+                    throttler.record_completion(url)
+                    if redirect_chain:
+                        retries_performed += sum(int(hop.get("attempt", 1)) - 1 for hop in redirect_chain if isinstance(hop, dict))
 
                     escalated = False
                     escalation_reason = ""
@@ -890,6 +1156,7 @@ class CrawlEngine(BaseCrawlerEngine):
                                 render_html, render_text, render_error, render_duration_ms = browser_session.render_url(
                                     final_target_url,
                                     max_document_bytes=self.settings.max_document_bytes,
+                                    cancellation_token=cancellation_token,
                                 )
                             except Exception as b_exc:
                                 render_html, render_text = "", ""
@@ -922,6 +1189,18 @@ class CrawlEngine(BaseCrawlerEngine):
                         seen_canonicals, seen_content_hashes, pagination_counts,
                     )
                     progress(len(pages), frontier.queue_size, robots_status)
+
+                    total_response_bytes += page.response_bytes
+                    if effective_max_bytes and total_response_bytes >= effective_max_bytes:
+                        termination_budget_reason = f"budget_exhausted: max_bytes reached ({total_response_bytes} >= {effective_max_bytes})"
+                        break
+                    if deadline and time.monotonic() >= deadline:
+                        elapsed = time.monotonic() - start_time
+                        termination_budget_reason = f"budget_exhausted: max_crawl_duration exceeded ({elapsed:.2f}s >= {effective_max_duration}s)"
+                        break
+
+                if not termination_budget_reason and budget and budget.max_pages is not None and len(pages) >= effective_max_pages:
+                    termination_budget_reason = f"budget_exhausted: max_pages reached ({len(pages)} >= {effective_max_pages})"
             finally:
                 if browser_session:
                     browser_session.close()
@@ -936,6 +1215,9 @@ class CrawlEngine(BaseCrawlerEngine):
         return self._build_crawl_result(
             request, "serial", actual_fetch_mode, pages, links, frontier,
             robots_status, start_time, started_at, cancellation_token,
+            termination_budget_reason=termination_budget_reason,
+            total_response_bytes=total_response_bytes,
+            retries_performed=retries_performed,
         )
 
     def _run_threaded(
@@ -947,14 +1229,28 @@ class CrawlEngine(BaseCrawlerEngine):
         workers = max(1, self.settings.thread_workers)
         start_time = time.monotonic()
         started_at = self._now()
+
+        budget = request.budget
+        effective_max_pages = budget.max_pages if (budget and budget.max_pages is not None) else request.max_urls
+        effective_max_depth = budget.max_depth if (budget and budget.max_depth is not None) else getattr(request, "max_depth", 10)
+        effective_max_bytes = budget.max_bytes if (budget and budget.max_bytes is not None) else 0
+        effective_max_duration = budget.max_duration_seconds if (budget and budget.max_duration_seconds is not None) else 0.0
+        effective_max_retries = budget.max_retries if (budget and budget.max_retries is not None) else self.settings.max_request_retries
+        effective_max_redirects = budget.redirect_limit if (budget and budget.redirect_limit is not None) else self.settings.max_redirects
+
+        deadline = (start_time + effective_max_duration) if effective_max_duration > 0 else 0.0
+        termination_budget_reason = ""
+        total_response_bytes = 0
+        retries_performed = 0
+
         frontier = CrawlFrontier(
             start_url=request.start_url,
-            max_urls=request.max_urls,
-            max_depth=getattr(request, "max_depth", 10),
+            max_urls=effective_max_pages,
+            max_depth=effective_max_depth,
             mode=request.mode,
             url_list=request.url_list,
             allow_private=getattr(self.settings, "allow_private_crawls", False),
-            max_retries=self.settings.max_request_retries,
+            max_retries=effective_max_retries,
             retry_backoff_seconds=self.settings.retry_backoff_seconds,
         )
         pages: list[PageRecord] = []
@@ -962,7 +1258,8 @@ class CrawlEngine(BaseCrawlerEngine):
         seen_content_hashes: dict[str, str] = {}
         seen_canonicals: dict[str, str] = {}
         pagination_counts: dict[str, int] = {}
-        throttler = DomainPolitenessThrottler(request.delay_seconds)
+        per_host_limit = request.per_host_concurrency if request.per_host_concurrency is not None else workers
+        throttler = DomainPolitenessThrottler(request.delay_seconds, per_host_concurrency=per_host_limit)
 
         headers = {
             "User-Agent": self.settings.user_agent,
@@ -970,7 +1267,7 @@ class CrawlEngine(BaseCrawlerEngine):
         }
 
         transport = httpx.HTTPTransport(
-            retries=self.settings.max_request_retries,
+            retries=effective_max_retries,
             limits=httpx.Limits(max_connections=workers * 2, max_keepalive_connections=workers, keepalive_expiry=30.0),
         )
 
@@ -983,44 +1280,57 @@ class CrawlEngine(BaseCrawlerEngine):
             requested_fetch_mode = "static"
 
         with httpx.Client(transport=transport, headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
-            robots, robots_status = self._robots(client, request.start_url)
+            robots, robots_status = self._safe_robots(client, request.start_url, respect_robots=request.respect_robots_txt, throttler=throttler)
 
             def _thread_worker_fetch(target_url: str) -> tuple[str, httpx.Response | None, list[dict[str, object]], str, float, float]:
-                throttler.throttle(target_url)
-                t_start = time.monotonic()
-                if self._is_fetch_one_sync_overridden():
-                    url, payload, chain, err = self._fetch_one_sync(target_url)
+                with throttler.acquire(target_url):
+                    t_start = time.monotonic()
+                    if self._is_fetch_one_sync_overridden():
+                        url, payload, chain, err = self._fetch_one_sync(target_url)
+                        t_end = time.monotonic()
+                        resp = None
+                        if payload is not None:
+                            status_code, resp_headers, content, final_url = payload
+                            resp = httpx.Response(status_code, headers=resp_headers, content=content, request=httpx.Request("GET", final_url))
+                        return target_url, resp, chain, err, t_start, t_end
+                    resp, chain, err = self._safe_fetch(
+                        client, target_url, cancellation_token,
+                        max_retries=effective_max_retries,
+                        max_redirects=effective_max_redirects,
+                    )
                     t_end = time.monotonic()
-                    resp = None
-                    if payload is not None:
-                        status_code, resp_headers, content, final_url = payload
-                        resp = httpx.Response(status_code, headers=resp_headers, content=content, request=httpx.Request("GET", final_url))
                     return target_url, resp, chain, err, t_start, t_end
-                resp, chain, err = self._safe_fetch(client, target_url, cancellation_token)
-                t_end = time.monotonic()
-                return target_url, resp, chain, err, t_start, t_end
 
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="crawl-worker") as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
                 in_flight: dict[concurrent.futures.Future, FrontierEntry] = {}
 
-                while not frontier.is_complete() and len(pages) < request.max_urls:
+                while not frontier.is_complete() and len(pages) < effective_max_pages:
                     if cancellation_token and cancellation_token.is_cancelled():
+                        break
+                    if deadline and time.monotonic() >= deadline:
+                        elapsed = time.monotonic() - start_time
+                        termination_budget_reason = f"budget_exhausted: max_crawl_duration exceeded ({elapsed:.2f}s >= {effective_max_duration}s)"
+                        break
+                    if effective_max_bytes > 0 and total_response_bytes >= effective_max_bytes:
+                        termination_budget_reason = f"budget_exhausted: max_bytes reached ({total_response_bytes} >= {effective_max_bytes})"
                         break
 
                     while len(in_flight) < workers and not frontier.is_complete():
                         entry = frontier.get_next()
                         if entry is None:
                             break
-                        if not robots.can_fetch(self.settings.user_agent, entry.url):
-                            frontier.mark_skipped(entry.url, reason="robots_disallowed")
-                            pages.append(self._error_page(
-                                entry.url, [], "robots_disallowed", "thread",
-                                depth=entry.depth, parent_url=entry.parent_url,
-                                requested_fetch_strategy=requested_fetch_mode,
-                                actual_fetch_strategy="static",
-                            ))
-                            progress(len(pages), frontier.queue_size, robots_status)
-                            continue
+                        if request.respect_robots_txt:
+                            robots, robots_status = self._safe_robots(client, entry.url, respect_robots=True, throttler=throttler)
+                            if not robots.can_fetch(self.settings.user_agent, entry.url):
+                                frontier.mark_skipped(entry.url, reason="robots_disallowed")
+                                pages.append(self._error_page(
+                                    entry.url, [], "robots_disallowed", "thread",
+                                    depth=entry.depth, parent_url=entry.parent_url,
+                                    requested_fetch_strategy=requested_fetch_mode,
+                                    actual_fetch_strategy="static",
+                                ))
+                                progress(len(pages), frontier.queue_size, robots_status)
+                                continue
 
                         fut = executor.submit(_thread_worker_fetch, entry.url)
                         in_flight[fut] = entry
@@ -1042,13 +1352,13 @@ class CrawlEngine(BaseCrawlerEngine):
                         try:
                             url, resp, chain, err, t_start, t_end = fut.result()
                         except Exception as exc:
-                            url, resp, chain, err = orig_entry.url, None, [], f"WorkerThreadException: {exc}"
+                            url, resp, chain, err = orig_entry.url, None, [], f"ThreadWorkerException: {exc}"
                             t_start, t_end = time.monotonic(), time.monotonic()
 
                         fetch_dur = (t_end - t_start) * 1000.0
                         page, page_links = self._build_page(
-                            request, orig_entry.url, resp, chain, err,
-                            parent_url=orig_entry.parent_url, depth=orig_entry.depth, engine_mode="thread",
+                            request, orig_entry.url, resp, chain, err, None,
+                            orig_entry.parent_url, orig_entry.depth, "thread",
                             fetch_duration_ms=fetch_dur,
                             requested_fetch_strategy=requested_fetch_mode,
                             actual_fetch_strategy="static",
@@ -1063,13 +1373,37 @@ class CrawlEngine(BaseCrawlerEngine):
                         )
                         progress(len(pages), frontier.queue_size, robots_status)
 
-                if cancellation_token and cancellation_token.is_cancelled():
+                        total_response_bytes += page.response_bytes
+                        if chain:
+                            retries_performed += sum(int(hop.get("attempt", 1)) - 1 for hop in chain if isinstance(hop, dict))
+                        if effective_max_bytes > 0 and total_response_bytes >= effective_max_bytes:
+                            termination_budget_reason = f"budget_exhausted: max_bytes reached ({total_response_bytes} >= {effective_max_bytes})"
+                            break
+                        if deadline and time.monotonic() >= deadline:
+                            elapsed = time.monotonic() - start_time
+                            termination_budget_reason = f"budget_exhausted: max_crawl_duration exceeded ({elapsed:.2f}s >= {effective_max_duration}s)"
+                            break
+                        if len(pages) >= effective_max_pages:
+                            if budget and budget.max_pages is not None:
+                                termination_budget_reason = f"budget_exhausted: max_pages reached ({len(pages)} >= {effective_max_pages})"
+                            break
+
+                    if termination_budget_reason:
+                        break
+
+                if not termination_budget_reason and budget and budget.max_pages is not None and len(pages) >= effective_max_pages:
+                    termination_budget_reason = f"budget_exhausted: max_pages reached ({len(pages)} >= {effective_max_pages})"
+
+                if in_flight:
                     for f in in_flight:
                         f.cancel()
 
         return self._build_crawl_result(
             request, "thread", "static", pages, links, frontier,
             robots_status, start_time, started_at, cancellation_token,
+            termination_budget_reason=termination_budget_reason,
+            total_response_bytes=total_response_bytes,
+            retries_performed=retries_performed,
         )
 
     def _run_coroutine(
@@ -1101,14 +1435,27 @@ class CrawlEngine(BaseCrawlerEngine):
         concurrency = max(1, self.settings.async_concurrency)
         start_time = time.monotonic()
         started_at = self._now()
+        budget = request.budget
+        effective_max_pages = budget.max_pages if (budget and budget.max_pages is not None) else request.max_urls
+        effective_max_depth = budget.max_depth if (budget and budget.max_depth is not None) else getattr(request, "max_depth", 10)
+        effective_max_bytes = budget.max_bytes if (budget and budget.max_bytes is not None) else None
+        effective_max_duration = budget.max_duration_seconds if (budget and budget.max_duration_seconds is not None) else None
+        effective_max_retries = budget.max_retries if (budget and budget.max_retries is not None) else self.settings.max_request_retries
+        effective_max_redirects = budget.redirect_limit if (budget and budget.redirect_limit is not None) else self.settings.max_redirects
+        deadline = (start_time + effective_max_duration) if effective_max_duration is not None else None
+
+        total_response_bytes = 0
+        retries_performed = 0
+        termination_budget_reason = ""
+
         frontier = CrawlFrontier(
             start_url=request.start_url,
-            max_urls=request.max_urls,
-            max_depth=getattr(request, "max_depth", 10),
+            max_urls=effective_max_pages,
+            max_depth=effective_max_depth,
             mode=request.mode,
             url_list=request.url_list,
             allow_private=getattr(self.settings, "allow_private_crawls", False),
-            max_retries=self.settings.max_request_retries,
+            max_retries=effective_max_retries,
             retry_backoff_seconds=self.settings.retry_backoff_seconds,
         )
         pages: list[PageRecord] = []
@@ -1116,7 +1463,8 @@ class CrawlEngine(BaseCrawlerEngine):
         seen_content_hashes: dict[str, str] = {}
         seen_canonicals: dict[str, str] = {}
         pagination_counts: dict[str, int] = {}
-        throttler = AsyncDomainPolitenessThrottler(request.delay_seconds)
+        per_host_limit = request.per_host_concurrency if request.per_host_concurrency is not None else concurrency
+        throttler = AsyncDomainPolitenessThrottler(request.delay_seconds, per_host_concurrency=per_host_limit)
 
         headers = {
             "User-Agent": self.settings.user_agent,
@@ -1133,26 +1481,36 @@ class CrawlEngine(BaseCrawlerEngine):
 
         if self._is_async_batch_overridden():
             with httpx.Client(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as sync_client:
-                robots, robots_status = self._robots(sync_client, request.start_url)
+                robots, robots_status = self._safe_robots(sync_client, request.start_url, respect_robots=request.respect_robots_txt)
 
-            while not frontier.is_complete() and len(pages) < request.max_urls:
+            while not frontier.is_complete() and len(pages) < effective_max_pages:
                 if cancellation_token and cancellation_token.is_cancelled():
                     break
+                if deadline and time.monotonic() >= deadline:
+                    elapsed = time.monotonic() - start_time
+                    termination_budget_reason = f"budget_exhausted: max_crawl_duration exceeded ({elapsed:.2f}s >= {effective_max_duration}s)"
+                    break
+                if effective_max_bytes and total_response_bytes >= effective_max_bytes:
+                    termination_budget_reason = f"budget_exhausted: max_bytes reached ({total_response_bytes} >= {effective_max_bytes})"
+                    break
+
                 batch_entries = []
                 while len(batch_entries) < concurrency and not frontier.is_complete():
                     e = frontier.get_next()
                     if e is None:
                         break
-                    if not robots.can_fetch(self.settings.user_agent, e.url):
-                        frontier.mark_skipped(e.url, reason="robots_disallowed")
-                        pages.append(self._error_page(
-                            e.url, [], "robots_disallowed", "async",
-                            depth=e.depth, parent_url=e.parent_url,
-                            requested_fetch_strategy=requested_fetch_mode,
-                            actual_fetch_strategy="static",
-                        ))
-                        progress(len(pages), frontier.queue_size, robots_status)
-                        continue
+                    if request.respect_robots_txt:
+                        robots, robots_status = self._safe_robots(sync_client, e.url, respect_robots=True)
+                        if not robots.can_fetch(self.settings.user_agent, e.url):
+                            frontier.mark_skipped(e.url, reason="robots_disallowed")
+                            pages.append(self._error_page(
+                                e.url, [], "robots_disallowed", "async",
+                                depth=e.depth, parent_url=e.parent_url,
+                                requested_fetch_strategy=requested_fetch_mode,
+                                actual_fetch_strategy="static",
+                            ))
+                            progress(len(pages), frontier.queue_size, robots_status)
+                            continue
                     batch_entries.append(e)
 
                 if not batch_entries:
@@ -1176,47 +1534,79 @@ class CrawlEngine(BaseCrawlerEngine):
                         seen_canonicals, seen_content_hashes, pagination_counts,
                     )
                     progress(len(pages), frontier.queue_size, robots_status)
+                    total_response_bytes += page.response_bytes
+                    if chain:
+                        retries_performed += sum(int(hop.get("attempt", 1)) - 1 for hop in chain if isinstance(hop, dict))
+                    if effective_max_bytes and total_response_bytes >= effective_max_bytes:
+                        termination_budget_reason = f"budget_exhausted: max_bytes reached ({total_response_bytes} >= {effective_max_bytes})"
+                        break
+                    if deadline and time.monotonic() >= deadline:
+                        elapsed = time.monotonic() - start_time
+                        termination_budget_reason = f"budget_exhausted: max_crawl_duration exceeded ({elapsed:.2f}s >= {effective_max_duration}s)"
+                        break
+
+                if termination_budget_reason:
+                    break
+
+            if not termination_budget_reason and budget and budget.max_pages is not None and len(pages) >= effective_max_pages:
+                termination_budget_reason = f"budget_exhausted: max_pages reached ({len(pages)} >= {effective_max_pages})"
 
             return self._build_crawl_result(
                 request, "async", "static", pages, links, frontier,
                 robots_status, start_time, started_at, cancellation_token,
+                termination_budget_reason=termination_budget_reason,
+                total_response_bytes=total_response_bytes,
+                retries_performed=retries_performed,
             )
 
         transport = httpx.AsyncHTTPTransport(
-            retries=self.settings.max_request_retries,
+            retries=effective_max_retries,
             limits=httpx.Limits(max_connections=concurrency * 2, max_keepalive_connections=concurrency, keepalive_expiry=30.0),
         )
 
         async with httpx.AsyncClient(transport=transport, headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
-            robots, robots_status = await self._async_robots(client, request.start_url)
+            robots, robots_status = await self._safe_async_robots(client, request.start_url, respect_robots=request.respect_robots_txt, throttler=throttler)
 
             async def _async_worker_fetch(target_url: str) -> tuple[str, httpx.Response | None, list[dict[str, object]], str, float, float]:
-                await throttler.throttle(target_url)
-                t_start = time.monotonic()
-                resp, chain, err = await self._safe_async_fetch(client, target_url, cancellation_token)
-                t_end = time.monotonic()
-                return target_url, resp, chain, err, t_start, t_end
+                async with throttler.acquire(target_url):
+                    t_start = time.monotonic()
+                    resp, chain, err = await self._safe_async_fetch(
+                        client, target_url, cancellation_token,
+                        max_retries=effective_max_retries,
+                        max_redirects=effective_max_redirects,
+                    )
+                    t_end = time.monotonic()
+                    return target_url, resp, chain, err, t_start, t_end
 
             active_tasks: dict[asyncio.Task, FrontierEntry] = {}
 
-            while not frontier.is_complete() and len(pages) < request.max_urls:
+            while not frontier.is_complete() and len(pages) < effective_max_pages:
                 if cancellation_token and cancellation_token.is_cancelled():
+                    break
+                if deadline and time.monotonic() >= deadline:
+                    elapsed = time.monotonic() - start_time
+                    termination_budget_reason = f"budget_exhausted: max_crawl_duration exceeded ({elapsed:.2f}s >= {effective_max_duration}s)"
+                    break
+                if effective_max_bytes and total_response_bytes >= effective_max_bytes:
+                    termination_budget_reason = f"budget_exhausted: max_bytes reached ({total_response_bytes} >= {effective_max_bytes})"
                     break
 
                 while len(active_tasks) < concurrency and not frontier.is_complete():
                     entry = frontier.get_next()
                     if entry is None:
                         break
-                    if not robots.can_fetch(self.settings.user_agent, entry.url):
-                        frontier.mark_skipped(entry.url, reason="robots_disallowed")
-                        pages.append(self._error_page(
-                            entry.url, [], "robots_disallowed", "async",
-                            depth=entry.depth, parent_url=entry.parent_url,
-                            requested_fetch_strategy=requested_fetch_mode,
-                            actual_fetch_strategy="static",
-                        ))
-                        progress(len(pages), frontier.queue_size, robots_status)
-                        continue
+                    if request.respect_robots_txt:
+                        robots, robots_status = await self._safe_async_robots(client, entry.url, respect_robots=True, throttler=throttler)
+                        if not robots.can_fetch(self.settings.user_agent, entry.url):
+                            frontier.mark_skipped(entry.url, reason="robots_disallowed")
+                            pages.append(self._error_page(
+                                entry.url, [], "robots_disallowed", "async",
+                                depth=entry.depth, parent_url=entry.parent_url,
+                                requested_fetch_strategy=requested_fetch_mode,
+                                actual_fetch_strategy="static",
+                            ))
+                            progress(len(pages), frontier.queue_size, robots_status)
+                            continue
 
                     task = asyncio.create_task(_async_worker_fetch(entry.url))
                     active_tasks[task] = entry
@@ -1259,6 +1649,27 @@ class CrawlEngine(BaseCrawlerEngine):
                     )
                     progress(len(pages), frontier.queue_size, robots_status)
 
+                    total_response_bytes += page.response_bytes
+                    if chain:
+                        retries_performed += sum(int(hop.get("attempt", 1)) - 1 for hop in chain if isinstance(hop, dict))
+                    if effective_max_bytes and total_response_bytes >= effective_max_bytes:
+                        termination_budget_reason = f"budget_exhausted: max_bytes reached ({total_response_bytes} >= {effective_max_bytes})"
+                        break
+                    if deadline and time.monotonic() >= deadline:
+                        elapsed = time.monotonic() - start_time
+                        termination_budget_reason = f"budget_exhausted: max_crawl_duration exceeded ({elapsed:.2f}s >= {effective_max_duration}s)"
+                        break
+                    if len(pages) >= effective_max_pages:
+                        if budget and budget.max_pages is not None:
+                            termination_budget_reason = f"budget_exhausted: max_pages reached ({len(pages)} >= {effective_max_pages})"
+                        break
+
+                if termination_budget_reason:
+                    break
+
+            if not termination_budget_reason and budget and budget.max_pages is not None and len(pages) >= effective_max_pages:
+                termination_budget_reason = f"budget_exhausted: max_pages reached ({len(pages)} >= {effective_max_pages})"
+
             if active_tasks:
                 for t in active_tasks:
                     t.cancel()
@@ -1267,6 +1678,9 @@ class CrawlEngine(BaseCrawlerEngine):
         return self._build_crawl_result(
             request, "async", "static", pages, links, frontier,
             robots_status, start_time, started_at, cancellation_token,
+            termination_budget_reason=termination_budget_reason,
+            total_response_bytes=total_response_bytes,
+            retries_performed=retries_performed,
         )
 
     def _run_multiprocess(
@@ -1280,14 +1694,27 @@ class CrawlEngine(BaseCrawlerEngine):
         started_at = self._now()
         parent_pid = os.getpid()
 
+        budget = request.budget
+        effective_max_pages = budget.max_pages if (budget and budget.max_pages is not None) else request.max_urls
+        effective_max_depth = budget.max_depth if (budget and budget.max_depth is not None) else getattr(request, "max_depth", 10)
+        effective_max_bytes = budget.max_bytes if (budget and budget.max_bytes is not None) else 0
+        effective_max_duration = budget.max_duration_seconds if (budget and budget.max_duration_seconds is not None) else 0.0
+        effective_max_retries = budget.max_retries if (budget and budget.max_retries is not None) else self.settings.max_request_retries
+        effective_max_redirects = budget.redirect_limit if (budget and budget.redirect_limit is not None) else self.settings.max_redirects
+
+        deadline = (start_time + effective_max_duration) if effective_max_duration > 0 else 0.0
+        termination_budget_reason = ""
+        total_response_bytes = 0
+        retries_performed = 0
+
         frontier = CrawlFrontier(
             start_url=request.start_url,
-            max_urls=request.max_urls,
-            max_depth=getattr(request, "max_depth", 10),
+            max_urls=effective_max_pages,
+            max_depth=effective_max_depth,
             mode=request.mode,
             url_list=request.url_list,
             allow_private=getattr(self.settings, "allow_private_crawls", False),
-            max_retries=self.settings.max_request_retries,
+            max_retries=effective_max_retries,
             retry_backoff_seconds=self.settings.retry_backoff_seconds,
         )
         pages: list[PageRecord] = []
@@ -1310,156 +1737,245 @@ class CrawlEngine(BaseCrawlerEngine):
         else:
             requested_fetch_mode = "static"
 
-        with httpx.Client(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
-            robots, robots_status = self._robots(client, request.start_url)
+        per_host_limit = request.per_host_concurrency if request.per_host_concurrency is not None else workers
+        throttler = DomainPolitenessThrottler(request.delay_seconds, per_host_concurrency=per_host_limit)
 
         if self._is_fetch_one_sync_overridden():
-            while not frontier.is_complete() and len(pages) < request.max_urls:
-                if cancellation_token and cancellation_token.is_cancelled():
-                    break
-                entry = frontier.get_next()
-                if entry is None:
-                    break
-                if not robots.can_fetch(self.settings.user_agent, entry.url):
-                    frontier.mark_skipped(entry.url, reason="robots_disallowed")
-                    pages.append(self._error_page(
-                        entry.url, [], "robots_disallowed", "process",
-                        depth=entry.depth, parent_url=entry.parent_url,
+            with httpx.Client(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
+                robots, robots_status = self._safe_robots(client, request.start_url, respect_robots=request.respect_robots_txt, throttler=throttler)
+                while not frontier.is_complete() and len(pages) < effective_max_pages:
+                    if cancellation_token and cancellation_token.is_cancelled():
+                        break
+                    if deadline and time.monotonic() >= deadline:
+                        elapsed = time.monotonic() - start_time
+                        termination_budget_reason = f"budget_exhausted: max_crawl_duration exceeded ({elapsed:.2f}s >= {effective_max_duration}s)"
+                        break
+                    if effective_max_bytes and total_response_bytes >= effective_max_bytes:
+                        termination_budget_reason = f"budget_exhausted: max_bytes reached ({total_response_bytes} >= {effective_max_bytes})"
+                        break
+                    entry = frontier.get_next()
+                    if entry is None:
+                        break
+                    if request.respect_robots_txt:
+                        robots, robots_status = self._safe_robots(client, entry.url, respect_robots=True, throttler=throttler)
+                        if not robots.can_fetch(self.settings.user_agent, entry.url):
+                            frontier.mark_skipped(entry.url, reason="robots_disallowed")
+                            pages.append(self._error_page(
+                                entry.url, [], "robots_disallowed", "process",
+                                depth=entry.depth, parent_url=entry.parent_url,
+                                requested_fetch_strategy=requested_fetch_mode,
+                                actual_fetch_strategy="static",
+                            ))
+                            progress(len(pages), frontier.queue_size, robots_status)
+                            continue
+                    throttler.throttle(entry.url)
+                    t_start = time.monotonic()
+                    url, payload, chain, err = self._fetch_one_sync(entry.url)
+                    t_end = time.monotonic()
+                    resp = None
+                    if payload is not None:
+                        status_code, resp_headers, content, final_url = payload
+                        resp = httpx.Response(status_code, headers=resp_headers, content=content, request=httpx.Request("GET", final_url))
+                    fetch_dur = (t_end - t_start) * 1000.0
+                    page, page_links = self._build_page(
+                        request, entry.url, resp, chain, err,
+                        parent_url=entry.parent_url, depth=entry.depth, engine_mode="process",
+                        fetch_duration_ms=fetch_dur,
                         requested_fetch_strategy=requested_fetch_mode,
                         actual_fetch_strategy="static",
-                    ))
+                    )
+                    page.duration_ms = fetch_dur
+                    self._process_and_record_page(
+                        request, frontier, page, page_links, pages, links,
+                        seen_canonicals, seen_content_hashes, pagination_counts,
+                    )
                     progress(len(pages), frontier.queue_size, robots_status)
-                    continue
-                t_start = time.monotonic()
-                url, payload, chain, err = self._fetch_one_sync(entry.url)
-                t_end = time.monotonic()
-                resp = None
-                if payload is not None:
-                    status_code, resp_headers, content, final_url = payload
-                    resp = httpx.Response(status_code, headers=resp_headers, content=content, request=httpx.Request("GET", final_url))
-                fetch_dur = (t_end - t_start) * 1000.0
-                page, page_links = self._build_page(
-                    request, entry.url, resp, chain, err,
-                    parent_url=entry.parent_url, depth=entry.depth, engine_mode="process",
-                    fetch_duration_ms=fetch_dur,
-                    requested_fetch_strategy=requested_fetch_mode,
-                    actual_fetch_strategy="static",
-                )
-                page.duration_ms = fetch_dur
-                self._process_and_record_page(
-                    request, frontier, page, page_links, pages, links,
-                    seen_canonicals, seen_content_hashes, pagination_counts,
-                )
-                progress(len(pages), frontier.queue_size, robots_status)
+                    total_response_bytes += page.response_bytes
+                    if chain:
+                        retries_performed += sum(int(hop.get("attempt", 1)) - 1 for hop in chain if isinstance(hop, dict))
+                    if effective_max_bytes and total_response_bytes >= effective_max_bytes:
+                        termination_budget_reason = f"budget_exhausted: max_bytes reached ({total_response_bytes} >= {effective_max_bytes})"
+                        break
+                    if deadline and time.monotonic() >= deadline:
+                        elapsed = time.monotonic() - start_time
+                        termination_budget_reason = f"budget_exhausted: max_crawl_duration exceeded ({elapsed:.2f}s >= {effective_max_duration}s)"
+                        break
+
+            if not termination_budget_reason and budget and budget.max_pages is not None and len(pages) >= effective_max_pages:
+                termination_budget_reason = f"budget_exhausted: max_pages reached ({len(pages)} >= {effective_max_pages})"
 
             return self._build_crawl_result(
                 request, "process", "static", pages, links, frontier,
                 robots_status, start_time, started_at, cancellation_token,
+                termination_budget_reason=termination_budget_reason,
+                total_response_bytes=total_response_bytes,
+                retries_performed=retries_performed,
             )
 
-        throttler = DomainPolitenessThrottler(request.delay_seconds)
         mp_context = multiprocessing.get_context("spawn")
         try:
-            with concurrent.futures.ProcessPoolExecutor(max_workers=workers, mp_context=mp_context) as executor:
-                in_flight: dict[concurrent.futures.Future, FrontierEntry] = {}
+            with httpx.Client(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as robots_client:
+                robots, robots_status = self._safe_robots(robots_client, request.start_url, respect_robots=request.respect_robots_txt, throttler=throttler)
+                with concurrent.futures.ProcessPoolExecutor(max_workers=workers, mp_context=mp_context) as executor:
+                    in_flight: dict[concurrent.futures.Future, FrontierEntry] = {}
+                    in_flight_by_domain: dict[str, int] = {}
+                    per_host_limit = request.per_host_concurrency if request.per_host_concurrency is not None else workers
+                    deferred_entries: list[FrontierEntry] = []
 
-                while not frontier.is_complete() and len(pages) < request.max_urls:
-                    if cancellation_token and cancellation_token.is_cancelled():
-                        break
-
-                    while len(in_flight) < workers and not frontier.is_complete():
-                        entry = frontier.get_next()
-                        if entry is None:
+                    while not frontier.is_complete() and len(pages) < effective_max_pages:
+                        if cancellation_token and cancellation_token.is_cancelled():
                             break
-                        if not robots.can_fetch(self.settings.user_agent, entry.url):
-                            frontier.mark_skipped(entry.url, reason="robots_disallowed")
-                            pages.append(self._error_page(entry.url, [], "robots_disallowed", "process", depth=entry.depth, parent_url=entry.parent_url))
-                            progress(len(pages), frontier.queue_size, robots_status)
+                        if deadline and time.monotonic() >= deadline:
+                            elapsed = time.monotonic() - start_time
+                            termination_budget_reason = f"budget_exhausted: max_crawl_duration exceeded ({elapsed:.2f}s >= {effective_max_duration}s)"
+                            break
+                        if effective_max_bytes and total_response_bytes >= effective_max_bytes:
+                            termination_budget_reason = f"budget_exhausted: max_bytes reached ({total_response_bytes} >= {effective_max_bytes})"
+                            break
+
+                        while len(in_flight) < workers:
+                            entry: FrontierEntry | None = None
+                            for i, d_entry in enumerate(deferred_entries):
+                                d_domain = (urlsplit(d_entry.url).netloc or "").lower()
+                                if in_flight_by_domain.get(d_domain, 0) < per_host_limit:
+                                    entry = deferred_entries.pop(i)
+                                    break
+
+                            if entry is None and not frontier.is_complete():
+                                cand = frontier.get_next()
+                                if cand is not None:
+                                    c_domain = (urlsplit(cand.url).netloc or "").lower()
+                                    if in_flight_by_domain.get(c_domain, 0) >= per_host_limit:
+                                        deferred_entries.append(cand)
+                                        continue
+                                    else:
+                                        entry = cand
+
+                            if entry is None:
+                                break
+
+                            if request.respect_robots_txt:
+                                robots, robots_status = self._safe_robots(robots_client, entry.url, respect_robots=True, throttler=throttler)
+                                if not robots.can_fetch(self.settings.user_agent, entry.url):
+                                    frontier.mark_skipped(entry.url, reason="robots_disallowed")
+                                    pages.append(self._error_page(
+                                        entry.url, [], "robots_disallowed", "process",
+                                        depth=entry.depth, parent_url=entry.parent_url,
+                                        requested_fetch_strategy=requested_fetch_mode,
+                                        actual_fetch_strategy="static",
+                                    ))
+                                    progress(len(pages), frontier.queue_size, robots_status)
+                                    continue
+
+                            entry_domain = (urlsplit(entry.url).netloc or "").lower()
+                            throttler.throttle(entry.url)
+
+                            task_dict = {
+                                "url": entry.url,
+                                "depth": entry.depth,
+                                "parent_url": entry.parent_url,
+                                "start_url": request.start_url,
+                                "user_agent": self.settings.user_agent,
+                                "timeout_seconds": self.settings.request_timeout_seconds,
+                                "max_retries": effective_max_retries,
+                                "retry_backoff_seconds": self.settings.retry_backoff_seconds,
+                                "max_redirects": effective_max_redirects,
+                                "delay_seconds": 0.0,
+                                "max_document_bytes": self.settings.max_document_bytes,
+                                "allow_private": getattr(self.settings, "allow_private_crawls", False),
+                            }
+
+                            try:
+                                fut = executor.submit(execute_worker_crawl_task, task_dict)
+                                in_flight[fut] = entry
+                                in_flight_by_domain[entry_domain] = in_flight_by_domain.get(entry_domain, 0) + 1
+                            except BrokenProcessPool as bpp:
+                                fatal_error = f"BrokenProcessPool: {bpp}"
+                                break
+
+                        if fatal_error:
+                            break
+
+                        if not in_flight:
+                            if frontier.is_complete() and not deferred_entries:
+                                break
+                            time.sleep(0.01)
                             continue
 
-                        throttler.throttle(entry.url)
-
-                        task_dict = {
-                            "url": entry.url,
-                            "depth": entry.depth,
-                            "parent_url": entry.parent_url,
-                            "start_url": request.start_url,
-                            "user_agent": self.settings.user_agent,
-                            "timeout_seconds": self.settings.request_timeout_seconds,
-                            "max_retries": self.settings.max_request_retries,
-                            "retry_backoff_seconds": self.settings.retry_backoff_seconds,
-                            "max_redirects": self.settings.max_redirects,
-                            "delay_seconds": 0.0,
-                            "max_document_bytes": self.settings.max_document_bytes,
-                            "allow_private": getattr(self.settings, "allow_private_crawls", False),
-                        }
-
                         try:
-                            fut = executor.submit(execute_worker_crawl_task, task_dict)
-                            in_flight[fut] = entry
+                            done, _ = concurrent.futures.wait(
+                                in_flight.keys(),
+                                timeout=0.05,
+                                return_when=concurrent.futures.FIRST_COMPLETED,
+                            )
                         except BrokenProcessPool as bpp:
                             fatal_error = f"BrokenProcessPool: {bpp}"
                             break
 
-                    if fatal_error:
-                        break
+                        for fut in done:
+                            orig_entry = in_flight.pop(fut)
+                            orig_domain = (urlsplit(orig_entry.url).netloc or "").lower()
+                            in_flight_by_domain[orig_domain] = max(0, in_flight_by_domain.get(orig_domain, 1) - 1)
+                            throttler.record_completion(orig_entry.url)
+                            try:
+                                res = fut.result()
+                                worker_links = [LinkRecord(**l) for l in res.get("links", [])]
+                                res_clean = dict(res)
+                                res_clean.pop("links", None)
+                                worker_pid = res_clean.pop("worker_pid", None)
+                                t_start = res_clean.pop("t_start", 0.0)
+                                t_end = res_clean.pop("t_end", 0.0)
 
-                    if not in_flight:
-                        if frontier.is_complete():
+                                page = PageRecord(**normalize_page_payload(res_clean))
+                                page.requested_fetch_strategy = requested_fetch_mode
+                                page.actual_fetch_strategy = "static"
+                                if worker_pid:
+                                    page.headers["x-worker-pid"] = str(worker_pid)
+                                page.headers["x-parent-pid"] = str(parent_pid)
+                                if t_start and t_end:
+                                    page.headers["x-fetch-start"] = str(t_start)
+                                    page.headers["x-fetch-end"] = str(t_end)
+
+                                self._process_and_record_page(
+                                    request, frontier, page, worker_links, pages, links,
+                                    seen_canonicals, seen_content_hashes, pagination_counts,
+                                )
+                            except Exception as exc:
+                                err_page = self._error_page(
+                                    orig_entry.url, [], f"MultiprocessTaskException: {exc}",
+                                    engine_mode="process", depth=orig_entry.depth, parent_url=orig_entry.parent_url,
+                                    requested_fetch_strategy=requested_fetch_mode,
+                                    actual_fetch_strategy="static",
+                                )
+                                pages.append(err_page)
+                                frontier.mark_failed(orig_entry.url, str(exc), is_retryable=False)
+
+                            progress(len(pages), frontier.queue_size, robots_status)
+
+                            total_response_bytes += page.response_bytes
+                            if res_clean.get("redirect_chain"):
+                                retries_performed += sum(int(hop.get("attempt", 1)) - 1 for hop in res_clean["redirect_chain"] if isinstance(hop, dict))
+                            if effective_max_bytes and total_response_bytes >= effective_max_bytes:
+                                termination_budget_reason = f"budget_exhausted: max_bytes reached ({total_response_bytes} >= {effective_max_bytes})"
+                                break
+                            if deadline and time.monotonic() >= deadline:
+                                elapsed = time.monotonic() - start_time
+                                termination_budget_reason = f"budget_exhausted: max_crawl_duration exceeded ({elapsed:.2f}s >= {effective_max_duration}s)"
+                                break
+                            if len(pages) >= effective_max_pages:
+                                if budget and budget.max_pages is not None:
+                                    termination_budget_reason = f"budget_exhausted: max_pages reached ({len(pages)} >= {effective_max_pages})"
+                                break
+
+                        if termination_budget_reason:
                             break
-                        time.sleep(0.01)
-                        continue
 
-                    try:
-                        done, _ = concurrent.futures.wait(
-                            in_flight.keys(),
-                            timeout=0.05,
-                            return_when=concurrent.futures.FIRST_COMPLETED,
-                        )
-                    except BrokenProcessPool as bpp:
-                        fatal_error = f"BrokenProcessPool: {bpp}"
-                        break
+                    if not termination_budget_reason and budget and budget.max_pages is not None and len(pages) >= effective_max_pages:
+                        termination_budget_reason = f"budget_exhausted: max_pages reached ({len(pages)} >= {effective_max_pages})"
 
-                    for fut in done:
-                        orig_entry = in_flight.pop(fut)
-                        try:
-                            res = fut.result()
-                            worker_links = [LinkRecord(**l) for l in res.get("links", [])]
-                            res_clean = dict(res)
-                            res_clean.pop("links", None)
-                            worker_pid = res_clean.pop("worker_pid", None)
-                            t_start = res_clean.pop("t_start", 0.0)
-                            t_end = res_clean.pop("t_end", 0.0)
-
-                            page = PageRecord(**normalize_page_payload(res_clean))
-                            page.requested_fetch_strategy = requested_fetch_mode
-                            page.actual_fetch_strategy = "static"
-                            if worker_pid:
-                                page.headers["x-worker-pid"] = str(worker_pid)
-                            page.headers["x-parent-pid"] = str(parent_pid)
-                            if t_start and t_end:
-                                page.headers["x-fetch-start"] = str(t_start)
-                                page.headers["x-fetch-end"] = str(t_end)
-
-                            self._process_and_record_page(
-                                request, frontier, page, worker_links, pages, links,
-                                seen_canonicals, seen_content_hashes, pagination_counts,
-                            )
-                        except Exception as exc:
-                            err_page = self._error_page(
-                                orig_entry.url, [], f"MultiprocessTaskException: {exc}",
-                                engine_mode="process", depth=orig_entry.depth, parent_url=orig_entry.parent_url,
-                                requested_fetch_strategy=requested_fetch_mode,
-                                actual_fetch_strategy="static",
-                            )
-                            pages.append(err_page)
-                            frontier.mark_failed(orig_entry.url, str(exc), is_retryable=False)
-
-                        progress(len(pages), frontier.queue_size, robots_status)
-
-                if cancellation_token and cancellation_token.is_cancelled():
-                    for f in in_flight:
-                        f.cancel()
+                    if cancellation_token and cancellation_token.is_cancelled():
+                        for f in in_flight:
+                            f.cancel()
         except Exception as exc:
             fatal_error = f"{type(exc).__name__}: {exc}"
 
@@ -1467,6 +1983,9 @@ class CrawlEngine(BaseCrawlerEngine):
             request, "process", "static", pages, links, frontier,
             robots_status, start_time, started_at, cancellation_token,
             fatal_error=fatal_error,
+            termination_budget_reason=termination_budget_reason,
+            total_response_bytes=total_response_bytes,
+            retries_performed=retries_performed,
         )
 
     def _materialize_static(self, request: CrawlRequest, result: tuple[str, tuple[int, dict[str, str], bytes, str] | None, list[dict[str, object]], str]) -> tuple[PageRecord, list[LinkRecord]]:

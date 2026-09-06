@@ -4,23 +4,47 @@ All notable changes, phase executions, and architectural transitions for Local S
 
 ---
 
-## Current Status: Phase 0, Phase 1, Phase 2 Complete (2A-2E Certified) / Ready for Phase 3
+## Current Status: Phase 0, Phase 1, Phase 2 Complete (2A-2F Certified) / Ready for Phase 2G
 
 ### Current Phase State:
 - **PHASE 0 (Baseline & Forensic Audit)**: COMPLETED / PASSED
 - **PHASE 1 (Evaluation Integrity)**: COMPLETED / PASSED
-- **PHASE 2 (Crawler Core)**: COMPLETED / FULLY CERTIFIED
+- **PHASE 2 (Crawler Core)**: ACTIVE / SUBPHASES 2A-2F CERTIFIED
   - **Subphase 2A (Contracts & State Model)**: COMPLETED / PASSED
   - **Subphase 2B (URL Normalization + Frontier + Crawl Lifecycle)**: COMPLETED / PASSED
   - **Subphase 2C (Four Independent Concurrency Engines)**: COMPLETED / PASSED & CERTIFIED
   - **Subphase 2D (Concurrency, Races, Failure & Resource Safety)**: COMPLETED / PASSED & CERTIFIED
   - **Subphase 2E (Static Fetch + Playwright + Smart Escalation)**: COMPLETED / PASSED & CERTIFIED
-- **PHASE 3 (Universal Extraction)**: READY TO BEGIN
+  - **Subphase 2F (Robots, Politeness, Retries & Crawl Budgets)**: COMPLETED / PASSED & CERTIFIED
+- **Subphase 2G (Authentication, Sessions & State Handling)**: READY TO BEGIN
+- **PHASE 3 (Universal Extraction)**: PENDING
 - **PHASE 4 (Knowledge/Indexing/Search)**: PENDING
 - **PHASE 5 (RAG Intelligence)**: PENDING
 - **PHASE 6 (Web Intelligence)**: PENDING
 - **PHASE 7 (UI/UX)**: PENDING
 - **PHASE 8 (Final Certification)**: PENDING
+
+---
+
+## [Phase 2F: Robots, Politeness, Retries & Crawl Budgets] - 2026-09-06
+
+### Added
+- Created `tests/test_robots_and_politeness.py` (12 tests):
+  - RFC 9309 robots compliance: 5xx and 429 fail-closed / disallow-all, 4xx allow-all, malformed robots graceful handling, user-agent specificity.
+  - Multi-host isolation in `DomainPolitenessThrottler` (slow/rate-limited domain A never stalls domain B).
+  - Per-host concurrency bounds (`per_host_concurrency=1` serializes requests to same host).
+  - `Crawl-delay` parsing and enforcement across Serial, Thread, Async, and Process engines.
+- Created `tests/test_crawl_budgets.py` (14 tests):
+  - Multi-engine crawl budget enforcement: `max_pages`, `max_depth`, `max_bytes`, `max_duration_seconds`, `redirect_limit`.
+  - Deterministic state transition to `CrawlStatus.BUDGET_EXHAUSTED` with explicit `termination_reason`.
+- Created `tests/test_infinite_site_defense.py` (7 tests):
+  - Path loop cycle detection (`detect_path_loop`) skipping cyclic sub-sequences.
+  - Cookieless session ID stripping (`;jsessionid=`, `/(S(...))/`, `;sid=`, `;phpsessid=`).
+  - Pagination limits and soft-404 cryptographic text deduplication.
+- Created `CrawlBudget` dataclass in `app/types.py` and integrated into `CrawlRequest`.
+- Extended `app/urltools.py` with `detect_path_loop(url_or_path, max_repeats=3)` and session ID regexes in `normalize_url`.
+- Enhanced `DomainPolitenessThrottler` and `AsyncDomainPolitenessThrottler` in `app/crawler.py` with dual `host` and `netloc` keying, and explicit `record_completion(url)` response tracking.
+- Recorded ADR-014 in `DECISIONS.md`.
 
 ---
 

@@ -19,6 +19,7 @@ from app.types import (
 from app.urltools import (
     UrlNormalizationPolicy,
     UrlValidationError,
+    detect_path_loop,
     is_same_host,
     normalize_url,
 )
@@ -187,6 +188,19 @@ class CrawlFrontier:
                         state=FrontierState.SKIPPED,
                         discovered_at=self._now(),
                         skip_reason="external_domain",
+                    )
+                    self._entries[target_key] = entry
+                    continue
+
+                # Check path loop directory traps
+                if detect_path_loop(target_key):
+                    entry = FrontierEntry(
+                        url=target_key,
+                        depth=parent_depth + 1,
+                        parent_url=parent_url,
+                        state=FrontierState.SKIPPED,
+                        discovered_at=self._now(),
+                        skip_reason="path_loop_detected",
                     )
                     self._entries[target_key] = entry
                     continue
@@ -491,6 +505,7 @@ class CrawlFrontier:
                 f"Active worker count mismatch: active={self._active_workers}, fetching={counts['fetching']}"
             )
 
+            counts["retries"] = self._retry_count
             return counts
 
     @property
@@ -512,3 +527,8 @@ class CrawlFrontier:
     def completed_count(self) -> int:
         with self._lock:
             return sum(1 for e in self._entries.values() if e.state == FrontierState.COMPLETED)
+
+    @property
+    def retry_count(self) -> int:
+        with self._lock:
+            return self._retry_count

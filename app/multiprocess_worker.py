@@ -8,6 +8,7 @@ payloads, performing genuine socket-level HTTP requests and CPU signal parsing i
 from __future__ import annotations
 
 import os
+import random
 import time
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
@@ -47,7 +48,8 @@ def _get_worker_client(user_agent: str, timeout_seconds: float, max_retries: int
 
 
 def _retry_delay(response: httpx.Response, attempt: int, base_seconds: float) -> float:
-    delay = base_seconds * (2 ** attempt)
+    jitter = random.uniform(0.8, 1.2)
+    delay = base_seconds * (2 ** attempt) * jitter
     value = response.headers.get("retry-after", "").strip()
     if value:
         try:
@@ -102,7 +104,7 @@ def execute_worker_crawl_task(task: dict[str, object]) -> dict[str, object]:
                 if attempt >= max_retries:
                     fetch_error = f"{type(exc).__name__} after {attempt + 1} attempt(s): {exc}"
                     break
-                time.sleep(retry_backoff_seconds * (2 ** attempt))
+                time.sleep(retry_backoff_seconds * (2 ** attempt) * random.uniform(0.8, 1.2))
                 continue
 
             hops.append({

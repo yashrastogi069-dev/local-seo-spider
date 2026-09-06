@@ -203,3 +203,36 @@ This document records the architectural and engineering decisions made for the L
      - SQLite `pages` table schema migrated and verified with full roundtrip fidelity.
 - **Consequences**: Guarantees optimal fetch throughput by keeping static pages on raw HTTP sockets while automatically hydrating SPAs and challenge pages in real browser contexts, with 100% forensic transparency and zero process leaks.
 
+---
+
+## ADR-014: RFC 9309 Robots Compliance, Politeness Isolation, Jittered Retries, Multi-Engine Crawl Budgets & Infinite Site Defense
+- **Status**: ACCEPTED / VERIFIED
+- **Context**: Web crawlers without bounded execution constraints and politeness protocols risk causing Denial-of-Service to remote hosts, violating RFC 9309 robots directives, falling into spider traps (calendar cycles, path loops, infinite pagination, tracking session parameters), and suffering runaway memory/network exhaustion. Additionally, multi-host crawling requires per-host rate limiting and concurrency semaphores to ensure slow or rate-limited endpoints do not stall parallel workers targeting healthy domains.
+- **Decision**:
+  1. RFC 9309 Robots Compliance (`app/crawler.py`):
+     - Server errors (5xx) and HTTP 429 rate limits are fail-closed (`policy.disallow_all = True`, disallow-all).
+     - Missing or 4xx responses (e.g. 404) are allow-all (`policy.allow_all = True`).
+     - Network errors (e.g. socket refused, connect timeout) set `policy.allow_all = True` so actual socket failures surface on target page records rather than falsely reporting `robots_disallowed`.
+     - `Crawl-delay` parsed with user-agent specificity and applied via domain politeness throttling across all engines (Serial, Thread, Coroutine, Multiprocess).
+     - `respect_robots_txt=False` supported for owned private audits.
+  2. Granular Politeness & Multi-Host Rate Limiting (`app/crawler.py`):
+     - `DomainPolitenessThrottler` and `AsyncDomainPolitenessThrottler` maintain per-domain concurrency semaphores (`per_host_concurrency`) and monotonic inter-request spacing (`delay_seconds`).
+     - Keying supports both `host` and `netloc` (matching with or without explicit port numbers).
+     - Zero cross-host interference: throttling or delays on domain A never block or delay workers targeting domain B.
+     - Multiprocess and serial engines record request completion times (`record_completion`) ensuring delay intervals are measured from response completion to subsequent request dispatch.
+  3. Bounded Retries with Exponential Backoff & Jitter:
+     - Strict classification of retryable (408, 425, 429, 500, 502, 503, 504, timeout, network error) vs non-retryable (400, 401, 403, 404, 410, SSRF, robots disallowed).
+     - Retries bounded by `max_retries`.
+     - `Retry-After` header parsed (integer seconds and HTTP-date) and clamped to safe limits (max 300s).
+     - Random uniform jitter (`0.8` to `1.2`) applied to eliminate lockstep retry storms.
+  4. Crawl Budgets & Deterministic Termination:
+     - Multi-dimensional budget constraints (`CrawlBudget`): `max_pages`, `max_depth`, `max_bytes`, `max_duration_seconds`, `max_retries`, `redirect_limit`.
+     - Slices frontier discovery, halts worker dispatch loops, and transitions `CrawlResult.status` to `CrawlStatus.BUDGET_EXHAUSTED` (`"budget_exhausted"`) with explicit, observable `termination_reason` across all 4 crawler engines.
+  5. Infinite Site Defense:
+     - Normalization strips session IDs (`;jsessionid=`, `/(S(...))/`, `;sid=`, `;phpsessid=`) and marketing trackers.
+     - Path cycle detection (`detect_path_loop`) skips cyclic path sub-sequences (repeat count $\ge 3$) with `skip_reason="path_loop_detected"`.
+     - Soft-404 and duplicate body content deduplicated via cryptographic text hashing (`seen_content_hashes`).
+     - Pagination loops bounded to maximum depth and page caps.
+- **Consequences**: The crawler operates with bounded predictability, strict politeness isolation, resilient jittered retry recovery, and bulletproof defense against infinite traps.
+
+
