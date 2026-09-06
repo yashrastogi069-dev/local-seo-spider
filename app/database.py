@@ -88,7 +88,10 @@ class Database:
                    source_type TEXT NOT NULL DEFAULT 'html_page', depth INTEGER NOT NULL DEFAULT 0, parent_url TEXT NOT NULL DEFAULT '',
                    normalized_url TEXT NOT NULL DEFAULT '', fetch_strategy TEXT NOT NULL DEFAULT 'static', crawler_engine TEXT NOT NULL DEFAULT 'serial',
                    response_bytes INTEGER NOT NULL DEFAULT 0, duration_ms REAL NOT NULL DEFAULT 0.0, error_category TEXT NOT NULL DEFAULT 'none',
-                   headers_json TEXT NOT NULL DEFAULT '{}'
+                   headers_json TEXT NOT NULL DEFAULT '{}',
+                   requested_fetch_strategy TEXT NOT NULL DEFAULT 'static', actual_fetch_strategy TEXT NOT NULL DEFAULT 'static',
+                   escalated INTEGER NOT NULL DEFAULT 0, escalation_reason TEXT NOT NULL DEFAULT '',
+                   fetch_duration_ms REAL NOT NULL DEFAULT 0.0, render_duration_ms REAL NOT NULL DEFAULT 0.0
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_pages_crawl_url ON pages(crawl_id, url);
                 CREATE INDEX IF NOT EXISTS idx_pages_crawl_final ON pages(crawl_id, final_url);
@@ -164,6 +167,12 @@ class Database:
             "duration_ms": "REAL NOT NULL DEFAULT 0.0",
             "error_category": "TEXT NOT NULL DEFAULT 'none'",
             "headers_json": "TEXT NOT NULL DEFAULT '{}'",
+            "requested_fetch_strategy": "TEXT NOT NULL DEFAULT 'static'",
+            "actual_fetch_strategy": "TEXT NOT NULL DEFAULT 'static'",
+            "escalated": "INTEGER NOT NULL DEFAULT 0",
+            "escalation_reason": "TEXT NOT NULL DEFAULT ''",
+            "fetch_duration_ms": "REAL NOT NULL DEFAULT 0.0",
+            "render_duration_ms": "REAL NOT NULL DEFAULT 0.0",
         }
         for name, definition in required.items():
             if name not in existing:
@@ -382,8 +391,9 @@ class Database:
                    canonical, meta_robots, x_robots, source_html, rendered_html, rendered_text, extracted_text, extraction_error, extracted_fields_json, extraction_notes_json, images_json, structured_data_json, api_entry_points_json,
                    redirects_json, fetch_error, render_error, robots_allowed, body_truncated, discovered_at, internal_inlinks, content_hash,
                    etag, last_modified, is_duplicate, duplicate_of, source_type, depth, parent_url,
-                   normalized_url, fetch_strategy, crawler_engine, response_bytes, duration_ms, error_category, headers_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   normalized_url, fetch_strategy, crawler_engine, response_bytes, duration_ms, error_category, headers_json,
+                   requested_fetch_strategy, actual_fetch_strategy, escalated, escalation_reason, fetch_duration_ms, render_duration_ms)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """,
                 [
                     (
@@ -402,6 +412,12 @@ class Database:
                         getattr(page, "duration_ms", 0.0),
                         getattr(page, "error_category", "none"),
                         json.dumps(getattr(page, "headers", {})),
+                        getattr(page, "requested_fetch_strategy", getattr(page, "fetch_strategy", "static")),
+                        getattr(page, "actual_fetch_strategy", getattr(page, "fetch_strategy", "static")),
+                        int(getattr(page, "escalated", False)),
+                        getattr(page, "escalation_reason", ""),
+                        getattr(page, "fetch_duration_ms", getattr(page, "duration_ms", 0.0)),
+                        getattr(page, "render_duration_ms", 0.0),
                     ) for page in pages
                 ],
             )
@@ -851,5 +867,6 @@ class Database:
         page["robots_allowed"] = bool(page["robots_allowed"])
         page["body_truncated"] = bool(page["body_truncated"])
         page["is_duplicate"] = bool(page.get("is_duplicate", 0))
+        page["escalated"] = bool(page.get("escalated", 0))
         return page
 

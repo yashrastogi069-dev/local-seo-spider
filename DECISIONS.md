@@ -182,3 +182,24 @@ This document records the architectural and engineering decisions made for the L
      - Verified SQLite transaction rollback safety on simulated failure.
 - **Consequences**: Guarantees fail-closed zero-data-loss execution under extreme concurrency, eliminates database write lock contention, and guarantees clean resource reclamation across long-running crawler lifecycles.
 
+---
+
+## ADR-013: Deterministic Static Acquisition, Playwright Session Lifecycle, and Smart Escalation Policy
+- **Status**: ACCEPTED / VERIFIED
+- **Context**: A successful HTTP response does not guarantee successful page acquisition. Server-rendered HTML documents can be completely acquired via high-performance static HTTP requests. However, client-side Single Page Applications (SPAs) mount empty container shells (`<div id="root"></div>`), and security gates deploy JavaScript challenges that require headless browser execution. Conversely, blindly launching a headless browser for every static page or every page containing third-party tracking scripts (Google Analytics, Facebook Pixel, etc.) causes severe performance degradation (10x-50x slower) and process thrashing.
+- **Decision**:
+  1. Static Acquisition Baseline (`app/crawler.py`, `tests/test_fetch_strategy_static.py`):
+     - Fast HTTP socket acquisition via `httpx.Client` capturing status codes, response headers, redirect hops, body truncation (`body_truncated`), compression (`gzip`, `deflate`), and non-HTML document extraction (`extract_document_text` for JSON, text, PDF, CSV).
+  2. Deterministic Playwright Browser Lifecycle (`app/browser.py`, `tests/test_fetch_strategy_playwright.py`):
+     - `PlaywrightBrowserSession` manages headless Chromium lifecycle with lazy initialization, isolated context, per-render tab creation, and deterministic cleanup in `finally` blocks ensuring zero orphan browser processes.
+     - Robust exception isolation in `render_url()` and `crawler.py` ensuring client-side script exceptions or navigation timeouts record `render_error` without aborting the crawl.
+  3. Conservative Smart Escalation Policy (`app/escalation.py`, `tests/test_smart_escalation.py`):
+     - Explicit heuristics: escalates on bot challenges (`CHALLENGE_PATTERNS`) and empty SPA shells (`SPA_CONTAINER_PATTERNS` with `< 100` chars visible text).
+     - Strict Anti-Pattern Rule: Never escalates normal static HTML pages containing `<script>` tags when visible text is present ($\ge 100$ chars). Non-HTML resources and standard error codes never escalate.
+  4. Complete Transparency & Forensic Provenance:
+     - `PageRecord` exposes `requested_fetch_strategy`, `actual_fetch_strategy`, `escalated`, `escalation_reason`, `fetch_duration_ms`, `render_duration_ms`.
+     - `CrawlResult` exposes `requested_fetch_mode`, `actual_fetch_mode`, `fallback_occurred`, `fallback_reason`, `pages_escalated`.
+     - Multi-worker static engines (`thread`, `async`, `process`) requesting browser/smart rendering flag explicit fail-closed fallback (`fallback_occurred=True`).
+     - SQLite `pages` table schema migrated and verified with full roundtrip fidelity.
+- **Consequences**: Guarantees optimal fetch throughput by keeping static pages on raw HTTP sockets while automatically hydrating SPAs and challenge pages in real browser contexts, with 100% forensic transparency and zero process leaks.
+

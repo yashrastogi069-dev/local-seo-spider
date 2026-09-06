@@ -10,7 +10,7 @@ This document defines the strict, non-negotiable release gates for every phase o
 |:---:|:---|:---:|:---:|:---|
 | **0** | Baseline & Forensic Audit | **PASSED** | 2026-09-04 | 125 tests cataloged, historic bugs identified, memory files initialized |
 | **1** | Evaluation Integrity | **PASSED** | 2026-09-05 | `test_metrics_math.py` (8/8), 155-query benchmark split evaluation (3/3), Brier = 0.0433 |
-| **2** | Crawler Core | **PARTIAL** | Pending (2A-2D Passed) | 281 tests pass; genuine 4-engine independence, stress resilience, 0 leaks, WAL concurrency |
+| **2** | Crawler Core | **PASSED** | 2026-09-06 | 308 tests pass; 4-engine independence, stress resilience, static & Playwright strategies, smart escalation, 0 leaks, WAL concurrency |
 | **3** | Universal Extraction | **PARTIAL** | Pending | JSON deep semantics, HTML, PDF extractors pass; token redaction verified |
 | **4** | Knowledge/Indexing/Search | **PARTIAL** | Pending | Hybrid BM25+Vector search, RRF, chunk provenance verified in benchmark |
 | **5** | RAG Intelligence | **PARTIAL** | Pending | Claim grounding, citation verifier, and dynamic answer planner verified |
@@ -93,15 +93,15 @@ This document defines the strict, non-negotiable release gates for every phase o
 - **SUBPHASE 2D GATE STATUS**: **PASSED**
 
 #### Subphase 2E: Static Fetch + Playwright + Smart Escalation
-- [ ] Static fetch completeness (status, headers, redirects, content-type, encoding, response size, timeouts, compression).
-- [ ] Playwright lifecycle (launch, context, page, navigation timeout, JS rendering, browser error recovery, clean exit).
-- [ ] Smart escalation with explicit criteria (empty shell, required rendered DOM absent, JS challenge, configured browser requirement).
-- [ ] Transparency & provenance (`requested_fetch_strategy`, `actual_fetch_strategy`, `escalated`, `escalation_reason`).
-- [ ] Controlled cases (normal HTML, JS-rendered page, static with script tags, empty shell, redirect, broken JS, browser timeout).
-- [ ] Resource cleanup (zero orphan browser processes, zero leaked contexts/pages).
-- **SUBPHASE 2E GATE STATUS**: **PENDING**
+- [x] Static fetch completeness (status, headers, redirects, content-type, encoding, response size, timeouts, compression).
+- [x] Playwright lifecycle (launch, context, page, navigation timeout, JS rendering, browser error recovery, clean exit).
+- [x] Smart escalation with explicit criteria (empty shell, required rendered DOM absent, JS challenge, configured browser requirement).
+- [x] Transparency & provenance (`requested_fetch_strategy`, `actual_fetch_strategy`, `escalated`, `escalation_reason`).
+- [x] Controlled cases (normal HTML, JS-rendered page, static with script tags, empty shell, redirect, broken JS, browser timeout).
+- [x] Resource cleanup (zero orphan browser processes, zero leaked contexts/pages).
+- **SUBPHASE 2E GATE STATUS**: **PASSED**
 
-- **GATE STATUS**: **PARTIAL (Subphases 2A, 2B, 2C, 2D PASSED)**
+- **GATE STATUS**: **PASSED (Phase 2 Certified)**
 
 ### PHASE 3: Universal Extraction
 - [x] Preservation of JSON deep semantics, scalar types, and nested object relationships.

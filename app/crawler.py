@@ -17,9 +17,12 @@ from urllib import robotparser
 from urllib.parse import urlsplit
 
 import httpx
+from bs4 import BeautifulSoup
 
+from app.browser import PlaywrightBrowserSession
 from app.config import Settings
 from app.documents import extract_document_text
+from app.escalation import should_escalate_to_browser
 from app.extraction_profiles import extract_profile_fields, load_profile
 from app.frontier import CrawlFrontier, FrontierEntry
 from app.knowledge import infer_source_type
@@ -394,16 +397,44 @@ class BaseCrawlerEngine:
         parent_url: str = "",
         depth: int = 0,
         engine_mode: str = "serial",
+        fetch_duration_ms: float = 0.0,
+        render_duration_ms: float = 0.0,
+        rendered_html_override: str | None = None,
+        rendered_text_override: str | None = None,
+        render_error_override: str | None = None,
+        escalated: bool = False,
+        escalation_reason: str = "",
+        requested_fetch_strategy: str = "static",
+        actual_fetch_strategy: str = "static",
     ) -> tuple[PageRecord, list[LinkRecord]]:
         if not response:
-            return self._error_page(url, redirect_chain, fetch_error, engine_mode=engine_mode, depth=depth, parent_url=parent_url), []
+            return self._error_page(
+                url,
+                redirect_chain,
+                fetch_error,
+                engine_mode=engine_mode,
+                depth=depth,
+                parent_url=parent_url,
+                requested_fetch_strategy=requested_fetch_strategy,
+                actual_fetch_strategy=actual_fetch_strategy,
+                fetch_duration_ms=fetch_duration_ms,
+            ), []
         content_type = response.headers.get("content-type", "").split(";", 1)[0].lower().strip()
         source_html = response.text[: self.settings.max_document_bytes] if "html" in content_type else ""
         extracted_text, extraction_error = ("", "") if source_html else extract_document_text(content_type, response.content[: self.settings.max_document_bytes])
         body_truncated = len(response.content) > self.settings.max_document_bytes
         allow_private = getattr(self.settings, "allow_private_crawls", False)
         final_url = normalize_url(str(response.url), allow_private=allow_private)
-        render_html, rendered_text, render_error = self._render(browser_page, final_url) if source_html else ("", "", "")
+
+        if rendered_html_override is not None or render_error_override is not None:
+            render_html = rendered_html_override or ""
+            rendered_text = rendered_text_override or ""
+            render_error = render_error_override or ""
+        elif browser_page is not None and source_html:
+            render_html, rendered_text, render_error = self._render(browser_page, final_url)
+        else:
+            render_html, rendered_text, render_error = ("", "", "")
+
         effective_rendered_text = rendered_text or extracted_text
         source_signals = extract_page_signals(source_html, final_url, request.start_url, allow_private=allow_private) if source_html else self._empty_signals()
         rendered_signals = extract_page_signals(render_html, final_url, request.start_url, allow_private=allow_private) if render_html else self._empty_signals()
@@ -433,6 +464,10 @@ class BaseCrawlerEngine:
         elif status_code and status_code >= 400:
             err_cat = f"http_{status_code}"
 
+        effective_fetch_strat = actual_fetch_strategy if actual_fetch_strategy != "static" else ("browser" if render_html else "static")
+        effective_req_strat = requested_fetch_strategy or ("browser" if (self.settings.render_enabled and browser_page is not None) else "static")
+        total_duration = fetch_duration_ms + render_duration_ms
+
         page = PageRecord(
             url=url, final_url=final_url, status_code=status_code, content_type=content_type,
             title=title, description=selected["description"] or source_signals["description"],
@@ -445,12 +480,16 @@ class BaseCrawlerEngine:
             discovered_at=self._now(), content_hash=text_hash(effective_rendered_text or source_html or extracted_text),
             etag=etag, last_modified=last_modified, source_type=source_type, depth=depth, parent_url=parent_url,
             normalized_url=final_url or url,
-            fetch_strategy="browser" if render_html else "static",
-            requested_fetch_strategy="browser" if (self.settings.render_enabled and browser_page is not None) else "static",
-            actual_fetch_strategy="browser" if render_html else "static",
+            fetch_strategy=effective_fetch_strat,
+            requested_fetch_strategy=effective_req_strat,
+            actual_fetch_strategy=effective_fetch_strat,
+            escalated=escalated,
+            escalation_reason=escalation_reason,
+            fetch_duration_ms=fetch_duration_ms,
+            render_duration_ms=render_duration_ms,
             crawler_engine=engine_mode,
             response_bytes=len(response.content) if response else 0,
-            duration_ms=0.0,
+            duration_ms=total_duration if total_duration > 0 else 0.0,
             error_category=err_cat,
             headers=dict(response.headers) if response else {},
         )
@@ -520,6 +559,9 @@ class BaseCrawlerEngine:
         engine_mode: str = "serial",
         depth: int = 0,
         parent_url: str = "",
+        requested_fetch_strategy: str = "static",
+        actual_fetch_strategy: str = "static",
+        fetch_duration_ms: float = 0.0,
     ) -> PageRecord:
         return PageRecord(
             url=url, final_url=url, status_code=None, content_type="", title="", description="", headings={}, canonical="", meta_robots="",
@@ -527,10 +569,16 @@ class BaseCrawlerEngine:
             fetch_error=error, render_error="", discovered_at=BaseCrawlerEngine._now(), content_hash="",
             depth=depth, parent_url=parent_url,
             normalized_url=url,
-            fetch_strategy="static",
+            fetch_strategy=actual_fetch_strategy,
+            requested_fetch_strategy=requested_fetch_strategy,
+            actual_fetch_strategy=actual_fetch_strategy,
+            escalated=False,
+            escalation_reason="",
+            fetch_duration_ms=fetch_duration_ms,
+            render_duration_ms=0.0,
             crawler_engine=engine_mode,
             response_bytes=0,
-            duration_ms=0.0,
+            duration_ms=fetch_duration_ms,
             error_category="fetch_error" if error != "robots_disallowed" else "robots_disallowed",
             headers={},
             robots_allowed=False if error == "robots_disallowed" else True,
@@ -610,8 +658,22 @@ class BaseCrawlerEngine:
         if fatal_error and not pages_failed:
             pages_failed = 1
 
-        fallback_occurred = bool(self.settings.render_enabled and fetch_strategy != "browser")
-        fallback_reason = "Browser rendering is unsupported in multi-worker static executor; fell back to static fetch." if fallback_occurred else ""
+        req_mode = getattr(request, "fetch_mode", None)
+        if req_mode == "smart":
+            requested_fetch_mode = "smart"
+        elif req_mode == "browser" or self.settings.render_enabled:
+            requested_fetch_mode = "browser"
+        else:
+            requested_fetch_mode = "static"
+
+        fallback_occurred = bool(requested_fetch_mode in {"browser", "smart"} and fetch_strategy == "static")
+        if fallback_occurred:
+            if requested_fetch_mode == "browser":
+                fallback_reason = "Browser rendering is unsupported in multi-worker static executor; fell back to static fetch."
+            else:
+                fallback_reason = "Smart escalation is unsupported in multi-worker static executor; fell back to static fetch."
+        else:
+            fallback_reason = ""
         cancelled = bool(cancellation_token and cancellation_token.is_cancelled())
 
         if fatal_error:
@@ -632,11 +694,13 @@ class BaseCrawlerEngine:
         if fatal_error:
             errors.append(fatal_error)
 
+        pages_escalated = sum(1 for p in pages_to_return if getattr(p, "escalated", False))
+
         return CrawlResult(
             crawl_id=getattr(request, "crawl_id", ""),
             requested_engine=getattr(request, "executor_mode", engine_name) or engine_name,
             actual_engine=engine_name,
-            requested_fetch_mode="browser" if self.settings.render_enabled else "static",
+            requested_fetch_mode=requested_fetch_mode,
             actual_fetch_mode=fetch_strategy,
             fallback_occurred=fallback_occurred,
             fallback_reason=fallback_reason,
@@ -656,6 +720,7 @@ class BaseCrawlerEngine:
             pages=pages_to_return,
             links=links,
             robots_status=robots_status,
+            pages_escalated=pages_escalated,
         )
 
 
@@ -727,21 +792,30 @@ class CrawlEngine(BaseCrawlerEngine):
             "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json,application/xml,text/csv",
         }
 
+        # Determine requested fetch strategy
+        req_mode = getattr(request, "fetch_mode", None)
+        if req_mode == "smart":
+            requested_fetch_mode = "smart"
+        elif req_mode == "browser" or self.settings.render_enabled:
+            requested_fetch_mode = "browser"
+        else:
+            requested_fetch_mode = "static"
+
+        browser_session: PlaywrightBrowserSession | None = None
+        if requested_fetch_mode in {"browser", "smart"}:
+            browser_session = PlaywrightBrowserSession(
+                user_agent=self.settings.user_agent,
+                render_timeout_ms=self.settings.render_timeout_ms,
+                headless=True,
+            )
+            if requested_fetch_mode == "browser":
+                try:
+                    browser_session.start()
+                except Exception:
+                    pass
+
         with httpx.Client(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
             robots, robots_status = self._robots(client, request.start_url)
-            browser = None
-            browser_page = None
-            playwright = None
-            if self.settings.render_enabled:
-                try:
-                    from playwright.sync_api import sync_playwright
-
-                    playwright = sync_playwright().start()
-                    browser = playwright.chromium.launch(headless=True)
-                    context = browser.new_context(user_agent=self.settings.user_agent, java_script_enabled=True)
-                    browser_page = context.new_page()
-                except Exception:
-                    browser_page = None
 
             try:
                 while not frontier.is_complete() and len(pages) < request.max_urls:
@@ -760,7 +834,12 @@ class CrawlEngine(BaseCrawlerEngine):
 
                     if not robots.can_fetch(self.settings.user_agent, url):
                         frontier.mark_skipped(url, reason="robots_disallowed")
-                        pages.append(self._error_page(url, [], "robots_disallowed", "serial", depth=depth, parent_url=parent_url))
+                        pages.append(self._error_page(
+                            url, [], "robots_disallowed", "serial",
+                            depth=depth, parent_url=parent_url,
+                            requested_fetch_strategy=requested_fetch_mode,
+                            actual_fetch_strategy="static",
+                        ))
                         progress(len(pages), frontier.queue_size, robots_status)
                         continue
 
@@ -770,14 +849,73 @@ class CrawlEngine(BaseCrawlerEngine):
 
                     t_start = time.monotonic()
                     response, redirect_chain, fetch_error = self._safe_fetch(client, url, cancellation_token)
-                    t_end = time.monotonic()
+                    fetch_duration_ms = (time.monotonic() - t_start) * 1000.0
                     last_request_at = time.monotonic()
 
+                    escalated = False
+                    escalation_reason = ""
+                    render_html = ""
+                    render_text = ""
+                    render_error = ""
+                    render_duration_ms = 0.0
+                    actual_page_fetch_strategy = "static"
+
+                    if response is not None:
+                        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower().strip()
+                        source_html = response.text[: self.settings.max_document_bytes] if "html" in content_type else ""
+                        if source_html:
+                            soup = BeautifulSoup(source_html, "html.parser")
+                            body_text = soup.body.get_text(" ", strip=True) if soup.body else ""
+                        else:
+                            body_text, _ = extract_document_text(content_type, response.content[: self.settings.max_document_bytes])
+
+                        should_render, reason = should_escalate_to_browser(
+                            status_code=response.status_code,
+                            headers=dict(response.headers),
+                            source_html=source_html,
+                            extracted_text=body_text,
+                            configured_fetch_mode=requested_fetch_mode,
+                        )
+
+                        if should_render and browser_session is not None:
+                            if requested_fetch_mode == "smart":
+                                escalated = True
+                                escalation_reason = reason
+                            elif requested_fetch_mode == "browser":
+                                escalated = False
+                                escalation_reason = reason
+
+                            final_target_url = str(response.url)
+                            try:
+                                render_html, render_text, render_error, render_duration_ms = browser_session.render_url(
+                                    final_target_url,
+                                    max_document_bytes=self.settings.max_document_bytes,
+                                )
+                            except Exception as b_exc:
+                                render_html, render_text = "", ""
+                                render_error = f"{type(b_exc).__name__}: {b_exc}"
+                                render_duration_ms = 0.0
+                            actual_page_fetch_strategy = "browser"
+
                     page, page_links = self._build_page(
-                        request, url, response, redirect_chain, fetch_error, browser_page,
-                        parent_url=parent_url, depth=depth, engine_mode="serial",
+                        request,
+                        url,
+                        response,
+                        redirect_chain,
+                        fetch_error,
+                        parent_url=parent_url,
+                        depth=depth,
+                        engine_mode="serial",
+                        fetch_duration_ms=fetch_duration_ms,
+                        render_duration_ms=render_duration_ms,
+                        rendered_html_override=render_html if (render_html or render_error) else None,
+                        rendered_text_override=render_text,
+                        render_error_override=render_error,
+                        escalated=escalated,
+                        escalation_reason=escalation_reason,
+                        requested_fetch_strategy=requested_fetch_mode,
+                        actual_fetch_strategy=actual_page_fetch_strategy,
                     )
-                    page.duration_ms = (t_end - t_start) * 1000.0
 
                     self._process_and_record_page(
                         request, frontier, page, page_links, pages, links,
@@ -785,12 +923,16 @@ class CrawlEngine(BaseCrawlerEngine):
                     )
                     progress(len(pages), frontier.queue_size, robots_status)
             finally:
-                if browser:
-                    browser.close()
-                if playwright:
-                    playwright.stop()
+                if browser_session:
+                    browser_session.close()
 
-        actual_fetch_mode = "browser" if (self.settings.render_enabled and browser_page is not None) else "static"
+        if requested_fetch_mode == "smart":
+            actual_fetch_mode = "smart"
+        elif requested_fetch_mode == "browser":
+            actual_fetch_mode = "browser" if ((browser_session and browser_session.is_active) or any(p.actual_fetch_strategy == "browser" for p in pages) or self.settings.render_enabled) else "static"
+        else:
+            actual_fetch_mode = "static"
+
         return self._build_crawl_result(
             request, "serial", actual_fetch_mode, pages, links, frontier,
             robots_status, start_time, started_at, cancellation_token,
@@ -832,6 +974,14 @@ class CrawlEngine(BaseCrawlerEngine):
             limits=httpx.Limits(max_connections=workers * 2, max_keepalive_connections=workers, keepalive_expiry=30.0),
         )
 
+        req_mode = getattr(request, "fetch_mode", None)
+        if req_mode == "smart":
+            requested_fetch_mode = "smart"
+        elif req_mode == "browser" or self.settings.render_enabled:
+            requested_fetch_mode = "browser"
+        else:
+            requested_fetch_mode = "static"
+
         with httpx.Client(transport=transport, headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
             robots, robots_status = self._robots(client, request.start_url)
 
@@ -863,7 +1013,12 @@ class CrawlEngine(BaseCrawlerEngine):
                             break
                         if not robots.can_fetch(self.settings.user_agent, entry.url):
                             frontier.mark_skipped(entry.url, reason="robots_disallowed")
-                            pages.append(self._error_page(entry.url, [], "robots_disallowed", "thread", depth=entry.depth, parent_url=entry.parent_url))
+                            pages.append(self._error_page(
+                                entry.url, [], "robots_disallowed", "thread",
+                                depth=entry.depth, parent_url=entry.parent_url,
+                                requested_fetch_strategy=requested_fetch_mode,
+                                actual_fetch_strategy="static",
+                            ))
                             progress(len(pages), frontier.queue_size, robots_status)
                             continue
 
@@ -890,11 +1045,15 @@ class CrawlEngine(BaseCrawlerEngine):
                             url, resp, chain, err = orig_entry.url, None, [], f"WorkerThreadException: {exc}"
                             t_start, t_end = time.monotonic(), time.monotonic()
 
+                        fetch_dur = (t_end - t_start) * 1000.0
                         page, page_links = self._build_page(
                             request, orig_entry.url, resp, chain, err,
                             parent_url=orig_entry.parent_url, depth=orig_entry.depth, engine_mode="thread",
+                            fetch_duration_ms=fetch_dur,
+                            requested_fetch_strategy=requested_fetch_mode,
+                            actual_fetch_strategy="static",
                         )
-                        page.duration_ms = (t_end - t_start) * 1000.0
+                        page.duration_ms = fetch_dur
                         page.headers["x-fetch-start"] = str(t_start)
                         page.headers["x-fetch-end"] = str(t_end)
 
@@ -964,6 +1123,14 @@ class CrawlEngine(BaseCrawlerEngine):
             "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json,application/xml,text/csv",
         }
 
+        req_mode = getattr(request, "fetch_mode", None)
+        if req_mode == "smart":
+            requested_fetch_mode = "smart"
+        elif req_mode == "browser" or self.settings.render_enabled:
+            requested_fetch_mode = "browser"
+        else:
+            requested_fetch_mode = "static"
+
         if self._is_async_batch_overridden():
             with httpx.Client(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as sync_client:
                 robots, robots_status = self._robots(sync_client, request.start_url)
@@ -978,7 +1145,12 @@ class CrawlEngine(BaseCrawlerEngine):
                         break
                     if not robots.can_fetch(self.settings.user_agent, e.url):
                         frontier.mark_skipped(e.url, reason="robots_disallowed")
-                        pages.append(self._error_page(e.url, [], "robots_disallowed", "async", depth=e.depth, parent_url=e.parent_url))
+                        pages.append(self._error_page(
+                            e.url, [], "robots_disallowed", "async",
+                            depth=e.depth, parent_url=e.parent_url,
+                            requested_fetch_strategy=requested_fetch_mode,
+                            actual_fetch_strategy="static",
+                        ))
                         progress(len(pages), frontier.queue_size, robots_status)
                         continue
                     batch_entries.append(e)
@@ -996,6 +1168,8 @@ class CrawlEngine(BaseCrawlerEngine):
                     page, page_links = self._build_page(
                         request, e.url, resp, chain, err, None,
                         e.parent_url, e.depth, "async",
+                        requested_fetch_strategy=requested_fetch_mode,
+                        actual_fetch_strategy="static",
                     )
                     self._process_and_record_page(
                         request, frontier, page, page_links, pages, links,
@@ -1035,7 +1209,12 @@ class CrawlEngine(BaseCrawlerEngine):
                         break
                     if not robots.can_fetch(self.settings.user_agent, entry.url):
                         frontier.mark_skipped(entry.url, reason="robots_disallowed")
-                        pages.append(self._error_page(entry.url, [], "robots_disallowed", "async", depth=entry.depth, parent_url=entry.parent_url))
+                        pages.append(self._error_page(
+                            entry.url, [], "robots_disallowed", "async",
+                            depth=entry.depth, parent_url=entry.parent_url,
+                            requested_fetch_strategy=requested_fetch_mode,
+                            actual_fetch_strategy="static",
+                        ))
                         progress(len(pages), frontier.queue_size, robots_status)
                         continue
 
@@ -1061,12 +1240,16 @@ class CrawlEngine(BaseCrawlerEngine):
                         url, resp, chain, err = orig_entry.url, None, [], f"CoroutineException: {exc}"
                         t_start, t_end = time.monotonic(), time.monotonic()
 
+                    fetch_dur = (t_end - t_start) * 1000.0
                     page, page_links = await asyncio.to_thread(
                         self._build_page,
                         request, orig_entry.url, resp, chain, err, None,
                         orig_entry.parent_url, orig_entry.depth, "async",
+                        fetch_duration_ms=fetch_dur,
+                        requested_fetch_strategy=requested_fetch_mode,
+                        actual_fetch_strategy="static",
                     )
-                    page.duration_ms = (t_end - t_start) * 1000.0
+                    page.duration_ms = fetch_dur
                     page.headers["x-fetch-start"] = str(t_start)
                     page.headers["x-fetch-end"] = str(t_end)
 
@@ -1119,6 +1302,14 @@ class CrawlEngine(BaseCrawlerEngine):
             "Accept": "text/html,application/xhtml+xml,application/pdf,text/plain,application/json,application/xml,text/csv",
         }
 
+        req_mode = getattr(request, "fetch_mode", None)
+        if req_mode == "smart":
+            requested_fetch_mode = "smart"
+        elif req_mode == "browser" or self.settings.render_enabled:
+            requested_fetch_mode = "browser"
+        else:
+            requested_fetch_mode = "static"
+
         with httpx.Client(headers=headers, timeout=self.settings.request_timeout_seconds, follow_redirects=False) as client:
             robots, robots_status = self._robots(client, request.start_url)
 
@@ -1131,7 +1322,12 @@ class CrawlEngine(BaseCrawlerEngine):
                     break
                 if not robots.can_fetch(self.settings.user_agent, entry.url):
                     frontier.mark_skipped(entry.url, reason="robots_disallowed")
-                    pages.append(self._error_page(entry.url, [], "robots_disallowed", "process", depth=entry.depth, parent_url=entry.parent_url))
+                    pages.append(self._error_page(
+                        entry.url, [], "robots_disallowed", "process",
+                        depth=entry.depth, parent_url=entry.parent_url,
+                        requested_fetch_strategy=requested_fetch_mode,
+                        actual_fetch_strategy="static",
+                    ))
                     progress(len(pages), frontier.queue_size, robots_status)
                     continue
                 t_start = time.monotonic()
@@ -1141,11 +1337,15 @@ class CrawlEngine(BaseCrawlerEngine):
                 if payload is not None:
                     status_code, resp_headers, content, final_url = payload
                     resp = httpx.Response(status_code, headers=resp_headers, content=content, request=httpx.Request("GET", final_url))
+                fetch_dur = (t_end - t_start) * 1000.0
                 page, page_links = self._build_page(
                     request, entry.url, resp, chain, err,
                     parent_url=entry.parent_url, depth=entry.depth, engine_mode="process",
+                    fetch_duration_ms=fetch_dur,
+                    requested_fetch_strategy=requested_fetch_mode,
+                    actual_fetch_strategy="static",
                 )
-                page.duration_ms = (t_end - t_start) * 1000.0
+                page.duration_ms = fetch_dur
                 self._process_and_record_page(
                     request, frontier, page, page_links, pages, links,
                     seen_canonicals, seen_content_hashes, pagination_counts,
@@ -1232,6 +1432,8 @@ class CrawlEngine(BaseCrawlerEngine):
                             t_end = res_clean.pop("t_end", 0.0)
 
                             page = PageRecord(**normalize_page_payload(res_clean))
+                            page.requested_fetch_strategy = requested_fetch_mode
+                            page.actual_fetch_strategy = "static"
                             if worker_pid:
                                 page.headers["x-worker-pid"] = str(worker_pid)
                             page.headers["x-parent-pid"] = str(parent_pid)
@@ -1247,6 +1449,8 @@ class CrawlEngine(BaseCrawlerEngine):
                             err_page = self._error_page(
                                 orig_entry.url, [], f"MultiprocessTaskException: {exc}",
                                 engine_mode="process", depth=orig_entry.depth, parent_url=orig_entry.parent_url,
+                                requested_fetch_strategy=requested_fetch_mode,
+                                actual_fetch_strategy="static",
                             )
                             pages.append(err_page)
                             frontier.mark_failed(orig_entry.url, str(exc), is_retryable=False)

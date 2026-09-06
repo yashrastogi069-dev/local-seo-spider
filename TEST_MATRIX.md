@@ -5,9 +5,9 @@ This document provides a detailed inventory of all 281 automated unit, integrati
 ---
 
 ## Overall Summary
-- **Total Test Files**: 36
-- **Total Test Cases**: 282
-- **Passed**: 280
+- **Total Test Files**: 39
+- **Total Test Cases**: 308
+- **Passed**: 306
 - **Skipped**: 2 (gracefully skipped due to optional `sentence-transformers` dependency)
 - **Failed**: 0
 - **Pass Rate on Active Environment**: 100.0%
@@ -39,6 +39,8 @@ This document provides a detailed inventory of all 281 automated unit, integrati
 | [`tests/test_engine_failure_fallback.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_engine_failure_fallback.py) | Resilience | 5 | PASSED | Fail-closed anti-fallback guarantees: invalid modes reject, pool crashes fail explicitly, zero silent serial fallback |
 | [`tests/test_extraction_profiles.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_extraction_profiles.py) | Unit | 2 | PASSED | Custom extraction profiles and schema mappings |
 | [`tests/test_failure_injection.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_failure_injection.py) | Failure Injection | 20 | PASSED | Adversarial network failure resilience across all 4 engines: dropped mid-stream, truncated bodies, malformed gzip, socket timeout, connection refused |
+| [`tests/test_fetch_strategy_playwright.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_fetch_strategy_playwright.py) | Browser Lifecycle | 7 | PASSED | Playwright browser lifecycle, lazy startup, per-render context/page isolation, broken JS recovery, navigation timeouts, zero orphan process leaks |
+| [`tests/test_fetch_strategy_static.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_fetch_strategy_static.py) | Static Strategy | 9 | PASSED | Static HTTP response vs page acquisition, headers, status codes, content-types, gzip encodings, body truncation, timeout/network errors, fallback transparency |
 | [`tests/test_frontier_lifecycle.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_frontier_lifecycle.py) | State Machine | 11 | PASSED | 8-state frontier transitions, illegal transition rejection, terminal idempotency, retry exponential backoff, redirect alias mapping, canonical deduplication, mathematical accounting reconciliation |
 | [`tests/test_job_ledger.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_job_ledger.py) | Integration | 2 | PASSED | Persistent crawl state, job queue, restartability |
 | [`tests/test_knowledge.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_knowledge.py) | Unit | 5 | PASSED | Chunking, heading path provenance, chunk deduplication |
@@ -50,6 +52,7 @@ This document provides a detailed inventory of all 281 automated unit, integrati
 | [`tests/test_rag_evaluation.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_rag_evaluation.py) | Integration | 2 | PASSED | Golden corpus indexing, retrieval recall sanity |
 | [`tests/test_rag_evaluation_harness.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_rag_evaluation_harness.py) | Benchmark | 3 | PASSED | 155-case benchmark evaluation, 6 retrieval ablations, 5 split tests |
 | [`tests/test_resource_safety.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_resource_safety.py) | Resource Safety | 7 | PASSED | Clean thread join with 0 leaked threads, multiprocess clean exit with 0 orphan processes, 5 consecutive crawl cycles memory stability (< 2.5MB drift), SQLite transaction rollback |
+| [`tests/test_smart_escalation.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_smart_escalation.py) | Smart Escalation | 10 | PASSED | Empty SPA containers (#root, #app, #__next), bot/JS challenges, anti-criteria prevention (script tags do not escalate), and multi-worker fallback transparency |
 | [`tests/test_ssrf_and_redaction.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_ssrf_and_redaction.py) | Security | 23 | PASSED | SSRF IP formats (octal, hex, dword, IPv6-mapped), cloud metadata, secret tokens |
 | [`tests/test_tooling.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_tooling.py) | Unit | 2 | PASSED | CLI argument parsing, environment variable loading |
 | [`tests/test_url_normalization.py`](file:///C:/Users/win%2010/Desktop/local-seo-spider/tests/test_url_normalization.py) | Unit / Invariant | 13 | PASSED | RFC 3986 scheme/host/port normalization, dot segments, percent encoding, query parameter sorting & deduplication, tracking strip, safe sensitive param retention, canonical & redirect resolution |
@@ -101,4 +104,13 @@ This document provides a detailed inventory of all 281 automated unit, integrati
 - Multiprocess clean exit with 0 orphan child processes.
 - Memory and file descriptor stability across 5 consecutive crawls (< 2.5MB drift).
 - SQLite atomic transaction rollback on failure without leaving orphaned partial records.
+
+### 6. Fetch Strategies, Playwright Lifecycle & Smart Escalation
+- Static HTTP fetch distinction: distinguish transport HTTP status codes from page extraction and body truncation.
+- Header preservation, content-type routing (HTML, JSON, PDF, plain text), and gzip/deflate decoding.
+- Playwright Chromium lifecycle: lazy launch, per-render page isolation, navigation timeout handling, broken JavaScript resilience.
+- Zero browser process leaks: deterministic cleanup of browser, context, and page instances under all exit paths.
+- Smart escalation detection: empty application shells (`#root`, `#app`, `#__next`) and bot/JS challenges.
+- Anti-criteria enforcement: normal static HTML containing script tags (analytics, tracking, widgets) is never escalated to browser.
+- Forensic observability: transparent reporting of `requested_fetch_strategy`, `actual_fetch_strategy`, `escalated`, `escalation_reason`, `fetch_duration_ms`, `render_duration_ms`, and `fallback_occurred` with `fallback_reason`.
 

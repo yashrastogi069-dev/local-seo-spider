@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import gzip
 import threading
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl, urlsplit
 
@@ -385,6 +387,115 @@ class ControlledHandler(BaseHTTPRequestHandler):
             delay = 0.25 if is_slow else 0.01
             time.sleep(delay)
             self._send_html(200, f"<html><body><h1>Mixed Delay Page {path}</h1></body></html>")
+
+        elif path == "/static-clean":
+            self._send_html(200, """<!DOCTYPE html>
+<html>
+<head><title>Clean Static Editorial Page</title></head>
+<body>
+    <h1>Clean Static Article</h1>
+    <p>This is a standard server-rendered HTML document containing rich editorial prose, semantic markup, and comprehensive documentation for local SEO crawlers.</p>
+    <p>It contains multiple distinct paragraphs of descriptive content and requires zero client-side JavaScript hydration or execution to be completely understood.</p>
+    <a href="/static-with-scripts">Next Article</a>
+</body>
+</html>""")
+
+        elif path == "/static-with-scripts":
+            self._send_html(200, """<!DOCTYPE html>
+<html>
+<head>
+    <title>Static Page With Analytics Scripts</title>
+    <script src="https://example.com/analytics.js" async></script>
+</head>
+<body>
+    <h1>Static Page With Script Tags</h1>
+    <p>This page includes third-party marketing tags, tracking scripts, and widget loaders, but the entire body copy is fully materialized in the initial static HTML payload.</p>
+    <p>A smart crawler must examine this page and determine that visible content is rich and readable, thereby avoiding expensive headless browser escalation.</p>
+    <script>console.log("analytics initialized");</script>
+</body>
+</html>""")
+
+        elif path == "/spa-empty-shell":
+            self._send_html(200, """<!DOCTYPE html>
+<html>
+<head><title>Single Page App Shell</title></head>
+<body>
+    <div id="root"></div>
+    <script>
+        document.getElementById('root').innerHTML = '<h1>SPA Rendered Client Heading</h1><p>Dynamic client-side content populated exclusively by JavaScript execution in a real browser engine.</p>';
+    </script>
+</body>
+</html>""")
+
+        elif path == "/js-challenge":
+            self._send_html(200, """<!DOCTYPE html>
+<html>
+<head><title>Just a moment...</title></head>
+<body>
+    <h1>Checking your browser before accessing...</h1>
+    <noscript><p>Please enable JavaScript and cookies to continue</p></noscript>
+    <div id="challenge-running">Verification in progress</div>
+    <script>
+        document.body.innerHTML = '<h1>Protected Content Unlocked</h1><p>Full article access granted following browser verification.</p>';
+    </script>
+</body>
+</html>""")
+
+        elif path == "/js-broken":
+            self._send_html(200, """<!DOCTYPE html>
+<html>
+<head>
+    <title>Broken JavaScript Page</title>
+    <script>throw new Error("Deliberate client script exception in inline execution");</script>
+</head>
+<body>
+    <h1>Broken Script Page Heading</h1>
+    <p>Despite the client JavaScript throwing an uncaught runtime error, the static DOM elements remain fully structured and readable.</p>
+</body>
+</html>""")
+
+        elif path == "/browser-timeout":
+            # Endpoint that sleeps 3 seconds, exceeding a 500ms browser render timeout
+            time.sleep(1.5)
+            self._send_html(200, "<html><body><h1>Timeout Page Rendered</h1></body></html>")
+
+        elif path == "/gzip-encoded":
+            content = b"<html><body><h1>Gzip Compressed Content</h1><p>Payload delivered using gzip content encoding.</p></body></html>"
+            compressed = gzip.compress(content)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(compressed)))
+            self.end_headers()
+            self.wfile.write(compressed)
+
+        elif path == "/deflate-encoded":
+            content = b"<html><body><h1>Deflate Compressed Content</h1><p>Payload delivered using deflate content encoding.</p></body></html>"
+            compressed = zlib.compress(content)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Encoding", "deflate")
+            self.send_header("Content-Length", str(len(compressed)))
+            self.end_headers()
+            self.wfile.write(compressed)
+
+        elif path == "/content-types/json":
+            self._send_text(200, '{"service": "crawler", "status": "active", "version": "2.0"}', "application/json")
+
+        elif path == "/content-types/text":
+            self._send_text(200, "Plain text document content for non-HTML fetch verification.", "text/plain")
+
+        elif path == "/content-types/pdf":
+            dummy_pdf = b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Count 0>>endobj\nxref\n0 3\n0000000000 65535 f\n0000000009 00000 n\n0000000052 00000 n\ntrailer<</Size 3/Root 1 0 R>>\nstartxref\n101\n%%EOF"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Length", str(len(dummy_pdf)))
+            self.end_headers()
+            self.wfile.write(dummy_pdf)
+
+        elif path == "/large-payload":
+            repeated_body = "<p>Repeated paragraph for response size measurement.</p>\n" * 1200
+            self._send_html(200, f"<html><body><h1>Large Document</h1>{repeated_body}</body></html>")
 
         else:
             self._send_text(404, f"404 Not Found: {path}", "text/plain")

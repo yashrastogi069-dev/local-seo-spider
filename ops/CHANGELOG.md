@@ -4,23 +4,72 @@ All notable changes, phase executions, and architectural transitions for Local S
 
 ---
 
-## Current Status: Phases 0, 1, 2A, 2B, 2C, 2D Complete / Advancing to Subphase 2E
+## Current Status: Phase 0, Phase 1, Phase 2 Complete (2A-2E Certified) / Ready for Phase 3
 
 ### Current Phase State:
 - **PHASE 0 (Baseline & Forensic Audit)**: COMPLETED / PASSED
 - **PHASE 1 (Evaluation Integrity)**: COMPLETED / PASSED
-- **PHASE 2 (Crawler Core)**: ACTIVE
+- **PHASE 2 (Crawler Core)**: COMPLETED / FULLY CERTIFIED
   - **Subphase 2A (Contracts & State Model)**: COMPLETED / PASSED
   - **Subphase 2B (URL Normalization + Frontier + Crawl Lifecycle)**: COMPLETED / PASSED
   - **Subphase 2C (Four Independent Concurrency Engines)**: COMPLETED / PASSED & CERTIFIED
   - **Subphase 2D (Concurrency, Races, Failure & Resource Safety)**: COMPLETED / PASSED & CERTIFIED
-  - **Subphase 2E (Static Fetch + Playwright + Smart Escalation)**: ACTIVE
-- **PHASE 3 (Universal Extraction)**: PENDING
+  - **Subphase 2E (Static Fetch + Playwright + Smart Escalation)**: COMPLETED / PASSED & CERTIFIED
+- **PHASE 3 (Universal Extraction)**: READY TO BEGIN
 - **PHASE 4 (Knowledge/Indexing/Search)**: PENDING
 - **PHASE 5 (RAG Intelligence)**: PENDING
 - **PHASE 6 (Web Intelligence)**: PENDING
 - **PHASE 7 (UI/UX)**: PENDING
 - **PHASE 8 (Final Certification)**: PENDING
+
+---
+
+## [Phase 2E: Static Fetch + Playwright + Smart Escalation] - 2026-09-06
+
+### Added
+- Created `app/escalation.py`:
+  - `should_escalate_to_browser()` evaluating page status, headers, and body content.
+  - Regex detection for empty SPA root containers (`#root`, `#app`, `#__next`) matching arbitrary attributes.
+  - Regex detection for bot/JS challenges (Cloudflare, PerimeterX, Datadome, reCAPTCHA, hCaptcha, Turnstile).
+  - Anti-criteria enforcement: normal static HTML containing script tags (Google Analytics, Tag Manager, Facebook Pixel, tracking widgets) never triggers escalation.
+  - Header case normalization (`headers_lower`) for RFC-compliant header matching.
+- Created `app/browser.py`:
+  - `PlaywrightBrowserSession` managing asynchronous Chromium lifecycle with lazy startup, context manager support (`async with`), per-render page isolation, hardened exception handling, and deterministic teardown.
+  - Zero orphan process guarantee: browser, context, and page instances are guaranteed closed in `finally` blocks.
+- Extended `app/types.py`:
+  - Added `FetchMode.SMART = "smart"`.
+  - Added `mode: str = "site"` and `fetch_mode: str = "static"` defaults to `CrawlRequest`.
+  - Added 6 forensic fields to `PageRecord`: `requested_fetch_strategy`, `actual_fetch_strategy`, `escalated`, `escalation_reason`, `fetch_duration_ms`, `render_duration_ms`.
+  - Added `pages_escalated: int = 0` to `CrawlResult` and implemented dictionary serialization/deserialization.
+- Extended database schema in `app/database.py`:
+  - Automatically migrated and persisted 7 Phase 2E columns in SQLite `pages` table.
+- Extended `app/multiprocess_worker.py`:
+  - Populated all Phase 2E forensic fields and empty `rendered_text: ""` for static worker fetches.
+- Created 3 comprehensive verification test suites (26 tests):
+  - `tests/test_fetch_strategy_static.py` (9 tests): static HTTP transport distinction, headers, status codes, content-types, gzip encodings, body truncation, timeout/network errors, fallback transparency.
+  - `tests/test_fetch_strategy_playwright.py` (7 tests): Playwright lifecycle, lazy startup, per-render context/page isolation, broken JS recovery, navigation timeouts, zero orphan process leaks.
+  - `tests/test_smart_escalation.py` (10 tests): empty SPA root containers, bot/JS challenges, anti-criteria enforcement, and multi-worker fallback tracking.
+- Added ADR-013 to `DECISIONS.md`.
+
+### Changed
+- Refactored `CrawlEngine._run_serial` in `app/crawler.py` to support `FetchMode.STATIC`, `FetchMode.BROWSER`, and `FetchMode.SMART` with lazy Playwright startup, per-render isolation, and timing metrics.
+- Updated `_run_threaded`, `_run_coroutine`, and `_run_multiprocess` to record static strategy and explicit `fallback_occurred=True` with descriptive `fallback_reason` when browser/smart mode is requested.
+- Updated `_build_page`, `_error_page`, and `_build_crawl_result` to serialize all Phase 2E fields faithfully.
+
+### Fixed
+- Fixed `CrawlResult.to_dict()` omission of `pages_escalated` (DEF-2E-01).
+- Fixed missing `fallback_reason` on smart multi-worker crawls without escalation (DEF-2E-02).
+- Isolated per-page render exceptions preventing crawl worker aborts (DEF-2E-03).
+- Supported arbitrary attribute orders and quotes in SPA container tags (DEF-2E-04).
+- Normalized header casing in challenge detection (DEF-2E-05).
+- Wrapped Playwright launch failures cleanly into `BrowserError` (DEF-2E-06).
+- Guaranteed non-null `rendered_text` key in multiprocess worker payload (DEF-2E-07).
+
+### Verified
+- 26/26 Phase 2E tests passed.
+- 306 passed, 2 skipped, 0 failed across full repository test suite (39 test modules).
+- Fresh-eyes subagent review completed; all 7 findings resolved.
+- Subphase 2E and Phase 2 overall release gates PASSED.
 
 ---
 

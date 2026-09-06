@@ -1,6 +1,6 @@
 # SESSION HANDOFF: ENGINEERING CONTINUITY RECORD
 
-*Date*: 2026-09-06T05:25:00+05:30  
+*Date*: 2026-09-06T06:15:00+05:30  
 *Handoff Author*: Principal Engineer & Independent QA Auditor  
 *Audience*: Incoming Senior / Staff Engineer continuing development on Local SEO Spider & Semantic RAG  
 
@@ -11,80 +11,79 @@ This repository houses `local-seo-spider`, an enterprise semantic crawler and RA
 
 - Phase 0 (Baseline & Forensic Audit): COMPLETED & CERTIFIED.
 - Phase 1 (Evaluation Integrity): COMPLETED & CERTIFIED (Baseline permanently frozen at `db7fc50`).
-- Phase 2 (Crawler Core): ACTIVE.
+- Phase 2 (Crawler Core): **COMPLETED & FULLY CERTIFIED**.
   - Subphase 2A (Crawler Contracts + State Model): COMPLETED & CERTIFIED (`phase-2a-crawler-contracts`).
   - Subphase 2B (URL Normalization + Frontier + Crawl Lifecycle): COMPLETED & CERTIFIED (`phase-2b-frontier`).
   - Subphase 2C (Four Independent Concurrency Engines): COMPLETED & CERTIFIED (`phase-2c-engine-independence`).
   - Subphase 2D (Concurrency Stress, Failure Injection & Resource Safety): COMPLETED & CERTIFIED (`phase-2d-concurrency-hardening`).
-  - Subphase 2E (Static Fetch + Playwright + Smart Escalation): READY TO BEGIN.
+  - Subphase 2E (Static Fetch + Playwright + Smart Escalation): COMPLETED & CERTIFIED (`phase-2e-fetch-strategy`).
+- Phase 3 (Universal Extraction): READY TO BEGIN.
 
-All 281 automated tests pass (279 passed, 2 skipped solely due to optional `sentence-transformers` package). Zero failures, zero regressions.
+All 308 automated tests pass (306 passed, 2 skipped solely due to optional `sentence-transformers` package). Zero failures, zero regressions across all 39 test modules.
 
 ---
 
 ## 2. Active Phase Status
-- **Active Phase**: PHASE 2 (Crawler Core).
-- **Completed Subphase**: Subphase 2D (Concurrency Stress, Failure Injection & Resource Safety).
-  - All 41 targeted tests pass across `tests/test_concurrency_stress.py`, `tests/test_failure_injection.py`, and `tests/test_resource_safety.py`.
-  - SQLite Write-Ahead Logging (`WAL`) and 30s busy timeout eliminates all database write lock contention under 10 concurrent threads.
-  - Interruptible sleeps (`_sleep_interruptible`, `_async_sleep_interruptible`) ensure sub-second cooperative mid-flight crawl cancellation (< 1.0s stop time).
-  - Adversarial failure injection resilience verified across all 4 engines for dropped connections, truncated streams, malformed gzip, socket timeouts, and connection refused.
-  - Resource safety verified: 0 thread leaks, 0 orphan child processes, bounded memory drift (< 2.5MB over 5 consecutive crawl cycles), and atomic SQLite rollback.
-- **Next Subphase In Line**: SUBPHASE 2E (Static Fetch + Playwright + Smart Escalation).
+- **Active Phase**: PHASE 2 (Crawler Core) — **COMPLETED & CERTIFIED**.
+- **Completed Subphase**: Subphase 2E (Static Fetch + Playwright + Smart Escalation).
+  - All 26 targeted tests pass across `tests/test_fetch_strategy_static.py`, `tests/test_fetch_strategy_playwright.py`, and `tests/test_smart_escalation.py`.
+  - Static fetch completeness verified: status codes, response headers, content-types, gzip/deflate decoding, body truncation, timeout/network errors, and fallback transparency.
+  - Playwright browser lifecycle verified: lazy startup, per-render context/page isolation, navigation timeouts, broken JS resilience, and deterministic cleanup with 0 orphan Chromium processes.
+  - Smart escalation verified: empty SPA root containers (`#root`, `#app`, `#__next`) and bot/JS challenges escalate to browser; strict anti-criteria enforcement ensures normal static HTML with script tags (analytics, tracking, widgets) never escalates.
+  - Full transparency: `requested_fetch_strategy`, `actual_fetch_strategy`, `escalated`, `escalation_reason`, `fetch_duration_ms`, `render_duration_ms`, and `pages_escalated` recorded on every page and crawl result.
+- **Next Phase In Line**: PHASE 3 (Universal Extraction).
 
 ---
 
-## 3. Work Completed in Subphase 2D
-1. **SQLite Database Concurrency Hardening (`app/database.py`)**:
-   - Enabled `PRAGMA journal_mode = WAL;` on database initialization.
-   - Configured `timeout = 30.0` and `PRAGMA busy_timeout = 30000;` on connection creation.
-   - Eliminated `sqlite3.OperationalError: database is locked` during concurrent multi-threaded writes.
-2. **Interruptible Sleep & Cooperative Cancellation (`app/crawler.py`)**:
-   - Sliced delay sleeps and retry backoffs into 50ms intervals checking `cancellation_token.is_cancelled()`.
-   - Added `_safe_fetch` and `_safe_async_fetch` on `BaseCrawlerEngine` to transparently bridge cancellation tokens and legacy 2-arg test stubs.
-3. **Controlled Server Stress Endpoints (`tests/controlled_crawler_server.py`)**:
-   - Added endpoints for dropped mid-stream TCP connections, half-written payloads, malformed gzip compression, 500 error storms, 429 rate-limiting bursts, rapid simultaneous discovery, and interleaved fast/slow responses.
-4. **Three Dedicated Verification Suites (41 tests)**:
-   - `tests/test_concurrency_stress.py`: 15/15 passed.
-   - `tests/test_failure_injection.py`: 20/20 passed.
-   - `tests/test_resource_safety.py`: 6/6 passed.
-5. **Persistent Memory Synchronized**:
-   - Added ADR-012 in `DECISIONS.md`.
+## 3. Work Completed in Subphase 2E
+1. **Types & Schema (`app/types.py`, `app/database.py`)**:
+   - Added `FetchMode.SMART = "smart"` and `fetch_mode: str = "static"` on `CrawlRequest`.
+   - Extended `PageRecord` and SQLite `pages` table with 7 forensic fields: `requested_fetch_strategy`, `actual_fetch_strategy`, `escalated`, `escalation_reason`, `fetch_duration_ms`, `render_duration_ms`.
+   - Added `pages_escalated: int = 0` to `CrawlResult` with serialization/deserialization.
+2. **Smart Escalation Heuristics (`app/escalation.py`)**:
+   - Created `should_escalate_to_browser()` with regex matching empty SPA shells and JS challenges.
+   - Enforced strict anti-criteria: normal static HTML containing script tags does not escalate.
+3. **Deterministic Playwright Browser Lifecycle (`app/browser.py`)**:
+   - Created `PlaywrightBrowserSession` with lazy initialization, context manager support, per-render page isolation, hardened exception wrapping, and deterministic teardown.
+4. **Engine Integration & Multi-Worker Fallback (`app/crawler.py`, `app/multiprocess_worker.py`)**:
+   - Integrated browser session and smart escalation into `_run_serial`.
+   - Explicitly flagged `fallback_occurred=True` and `fallback_reason` on multi-worker static engines when browser rendering is requested.
+5. **Fresh-Eyes Subagent Review Remediation**:
+   - Remediated all 7 findings (3 P1, 4 P2) identified by subagent review.
+6. **Persistent Memory Synchronized**:
+   - Added ADR-013 to `DECISIONS.md`.
    - Updated `TEST_MATRIX.md`, `RELEASE_GATES.md`, `REQUIREMENTS_TRACEABILITY.md`, `ops/STATE.md`, and `CHANGELOG.md`.
 
 ---
 
 ## 4. Test & Verification State
 - **Command**: `pytest`
-- **Total Tests**: 281
-- **Passed**: 279
+- **Total Tests**: 308
+- **Passed**: 306
 - **Failed**: 0
 - **Skipped**: 2 (gracefully skipped: `sentence-transformers` optional package)
-- **Duration**: ~210s full suite, ~101s Phase 2D suite.
+- **Duration**: ~272s full suite, ~38s Phase 2E suite.
 
 ---
 
 ## 5. Architectural Invariants Preserved
-- **Zero Lost URLs & Zero Duplicate DB Inserts**: Exact frontier set-based deduplication verified under parallel worker storms.
-- **Zero Deadlocks / Livelocks**: Per-domain politeness and WAL mode prevent any worker stall or starvation.
-- **Fail-Closed Guarantee**: Injected errors record explicit failures with `actual_engine == requested_engine`; zero silent fallback to serial.
-- **Clean Resource Reclamation**: 0 leaked threads, 0 orphan processes, bounded memory footprint across repeated cycles.
+- **Zero Silent Fallback**: Multi-worker engines requesting browser mode explicitly flag `fallback_occurred=True` with descriptive reasons.
+- **Zero Process Leaks**: Browser sessions, contexts, and pages close cleanly in `finally` blocks; zero orphan Chromium processes.
+- **Zero Metric Self-Deception**: IR metrics remain unclipped in $[0.0, 1.0]$.
+- **Deterministic URL Accounting**: Exact URL conservation across frontier queues, retry pools, and DB persistence.
+- **Backward Compatibility**: `CrawlResult` maintains 3-tuple unpacking (`pages, links, robots = result`) for all legacy callers.
 
 ---
 
-## 6. Exact Next Steps for Subphase 2E
-1. Stage, commit, and tag Phase 2D:
+## 6. Exact Next Steps for Phase 3 (Universal Extraction)
+1. Commit and tag Phase 2E:
    ```bash
    git add .
-   git commit -m "feat(crawler): certify Phase 2D concurrency stress, failure injection and resource safety"
-   git tag -a phase-2d-concurrency-hardening -m "Phase 2D certified: stress resilience, 0 leaks, 0 lost URLs"
+   git commit -m "feat(crawler): certify Phase 2E static fetch, Playwright lifecycle, and smart escalation"
+   git tag -a phase-2e-fetch-strategy -m "Phase 2E certified: observable fetch strategy, smart escalation, 0 process leaks"
    ```
-2. Execute Subphase 2E: Static Fetch + Playwright + Smart Escalation:
-   - Verify static fetch completeness (status, headers, redirects, content-type, encoding, size, timeouts, compression, network errors).
-   - Verify Playwright browser lifecycle (launch, context, page, navigation timeout, redirects, JS rendering, error recovery, cleanup).
-   - Define and implement smart escalation with explicit criteria (empty application shell, missing rendered DOM, JS challenge, configured browser requirement).
-   - Verify fetch strategy transparency (`requested_fetch_strategy`, `actual_fetch_strategy`, `escalated`, `escalation_reason`).
-   - Run controlled cases to ensure normal static pages do NOT trigger unnecessary browser escalation.
+2. Present full Phase 2 completion certification report to user.
+3. Await user confirmation before starting Phase 3 (Universal Extraction).
 
 
 

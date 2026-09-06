@@ -39,6 +39,7 @@ class FetchMode(str, Enum):
 
     STATIC = "static"
     BROWSER = "browser"
+    SMART = "smart"
 
 
 class CancellationToken:
@@ -245,6 +246,10 @@ class PageRecord:
     headers: dict[str, str] = field(default_factory=dict)
     requested_fetch_strategy: str = ""
     actual_fetch_strategy: str = ""
+    escalated: bool = False
+    escalation_reason: str = ""
+    fetch_duration_ms: float = 0.0
+    render_duration_ms: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.requested_fetch_strategy:
@@ -281,6 +286,7 @@ class CrawlResult:
     pages_succeeded: int = 0
     pages_failed: int = 0
     pages_skipped: int = 0
+    pages_escalated: int = 0
     duplicates_count: int = 0
     retry_count: int = 0
     errors: list[str] = field(default_factory=list)
@@ -324,6 +330,7 @@ class CrawlResult:
             "pages_succeeded": self.pages_succeeded,
             "pages_failed": self.pages_failed,
             "pages_skipped": self.pages_skipped,
+            "pages_escalated": self.pages_escalated,
             "duplicates_count": self.duplicates_count,
             "retry_count": self.retry_count,
             "errors": list(self.errors),
@@ -351,7 +358,7 @@ class IssueRecord:
 @dataclass
 class CrawlRequest:
     start_url: str
-    mode: str
+    mode: str = "site"
     url_list: list[str] = field(default_factory=list)
     max_urls: int = 500
     delay_seconds: float = 0.35
@@ -362,6 +369,7 @@ class CrawlRequest:
     follow_api_entry_points: bool = False
     crawl_id: str = ""
     max_depth: int = 10
+    fetch_mode: str = "static"
 
     def public_settings(self) -> dict[str, Any]:
         return {
@@ -375,6 +383,7 @@ class CrawlRequest:
             "follow_api_entry_points": self.follow_api_entry_points,
             "crawl_id": self.crawl_id,
             "max_depth": self.max_depth,
+            "fetch_mode": self.fetch_mode,
         }
 
     def storage_payload(self) -> dict[str, Any]:
@@ -396,6 +405,7 @@ class CrawlRequest:
             follow_api_entry_points=bool(payload.get("follow_api_entry_points", False)),
             crawl_id=str(payload.get("crawl_id", "")),
             max_depth=int(payload.get("max_depth", 10)),
+            fetch_mode=str(payload.get("fetch_mode", "static")),
         )
 
 
